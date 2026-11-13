@@ -24,6 +24,16 @@ class IconDrawable(private val kind: Kind, color: Int) : Drawable() {
         EXIT(24f, 2f),
         MIC(24f, 2f),
         TRASH(24f, 2f),
+        GEAR(24f, 1.8f),
+        BACK(24f, 2f),
+        CHEVRON(24f, 2f),
+        SHIELD(24f, 1.8f),
+        PERSON(24f, 1.8f),
+        PHONE(24f, 1.8f),
+        DOC(24f, 1.8f),
+        INFO(24f, 1.8f),
+        THEME(24f, 1.8f),
+        MIC_OFF(24f, 1.8f),
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -89,6 +99,50 @@ class IconDrawable(private val kind: Kind, color: Int) : Drawable() {
                 canvas.drawLine(4f, 7f, 20f, 7f, paint)
                 canvas.drawPath(path(9f, 7f, 9f, 4f, 15f, 4f, 15f, 7f), paint)
                 canvas.drawPath(path(6f, 7f, 7f, 20f, 17f, 20f, 18f, 7f), paint)
+            }
+            Kind.GEAR -> {
+                canvas.drawCircle(12f, 12f, 3f, paint)
+                canvas.drawCircle(12f, 12f, 7f, paint)
+                // 톱니를 굵고 각지게 그려야 해 모양과 구분된다
+                val tooth = Paint(paint).apply { strokeWidth = 3.6f; strokeCap = Paint.Cap.BUTT }
+                for (i in 0 until 8) {
+                    val a = Math.toRadians(i * 45.0)
+                    val c = Math.cos(a).toFloat()
+                    val s = Math.sin(a).toFloat()
+                    canvas.drawLine(12f + 7f * c, 12f + 7f * s, 12f + 9.8f * c, 12f + 9.8f * s, tooth)
+                }
+            }
+            Kind.BACK -> canvas.drawPath(path(15f, 5f, 8f, 12f, 15f, 19f), paint)
+            Kind.CHEVRON -> canvas.drawPath(path(9f, 5f, 16f, 12f, 9f, 19f), paint)
+            Kind.SHIELD -> canvas.drawPath(path(12f, 2f, 20f, 5f, 20f, 12f, 12f, 22f, 4f, 12f, 4f, 5f).apply { close() }, paint)
+            Kind.PERSON -> {
+                canvas.drawCircle(12f, 8f, 4f, paint)
+                canvas.drawArc(RectF(4f, 13f, 20f, 29f), 180f, 180f, false, paint)
+            }
+            Kind.PHONE -> {
+                canvas.drawRoundRect(RectF(6f, 2f, 18f, 22f), 2.5f, 2.5f, paint)
+                canvas.drawLine(11f, 18f, 13f, 18f, paint)
+            }
+            Kind.DOC -> {
+                canvas.drawPath(path(14f, 2f, 6f, 2f, 6f, 22f, 18f, 22f, 18f, 6f, 14f, 2f, 14f, 6f, 18f, 6f), paint)
+                canvas.drawLine(9f, 13f, 15f, 13f, paint)
+                canvas.drawLine(9f, 17f, 13f, 17f, paint)
+            }
+            Kind.INFO -> {
+                canvas.drawCircle(12f, 12f, 9f, paint)
+                canvas.drawLine(12f, 11f, 12f, 17f, paint)
+                canvas.drawLine(12f, 7.5f, 12f, 7.51f, paint)
+            }
+            Kind.THEME -> {
+                canvas.drawCircle(12f, 12f, 9f, paint)
+                val fill = Paint(paint).apply { style = Paint.Style.FILL }
+                canvas.drawArc(RectF(3f, 3f, 21f, 21f), 90f, 180f, true, fill)
+            }
+            Kind.MIC_OFF -> {
+                canvas.drawRoundRect(RectF(9f, 3f, 15f, 15f), 3f, 3f, paint)
+                canvas.drawPath(path(5f, 11f, 5f, 13f, 8f, 17f, 16f, 17f, 19f, 13f, 19f, 11f), paint)
+                canvas.drawLine(12f, 17f, 12f, 21f, paint)
+                canvas.drawLine(3f, 3f, 21f, 21f, paint)
             }
         }
         canvas.restore()

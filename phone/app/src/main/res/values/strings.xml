@@ -31,6 +31,32 @@
     <string name="desc_mine">내가 보낸 글: %1$s, 상태 %2$s</string>
     <string name="desc_shared">%1$s 보낸 글: %2$s</string>
     <string name="name_hint">대화명</string>
+    <string name="name_unset">정하기</string>
+    <string name="name_row_description">대화명 %1$s, 바꾸기</string>
+    <string name="save">저장</string>
+    <string name="settings">설정</string>
+    <string name="back">뒤로</string>
+    <string name="connect_car">차에 연결</string>
+    <string name="section_me">나</string>
+    <string name="section_screen">화면</string>
+    <string name="section_info">정보</string>
+    <string name="privacy">개인정보</string>
+    <string name="licenses">오픈소스 라이선스</string>
+    <string name="version">버전</string>
+    <string name="privacy_mic">폰 마이크 안 켬</string>
+    <string name="privacy_mic_sub">차 마이크 소리만 받음</string>
+    <string name="privacy_device">인식은 이 폰 안에서</string>
+    <string name="privacy_device_sub">서버로 보내지 않음</string>
+    <string name="privacy_store">저장 안 함</string>
+    <string name="privacy_store_sub">나가면 자막·글 삭제</string>
+    <string name="privacy_name">대화명·테마만 이 폰에</string>
+    <string name="privacy_name_sub">대화명은 같은 차 동승자에게 보임</string>
+    <string name="privacy_accuracy">자막은 틀릴 수 있음</string>
+    <string name="privacy_accuracy_sub">긴급 안내용 아님</string>
+    <string name="license_zxing" translatable="false">ZXing core 3.5.4</string>
+    <string name="license_zxing_sub">Apache License 2.0 · QR 읽기</string>
+    <string name="license_noto" translatable="false">Noto Sans KR</string>
+    <string name="license_noto_sub">SIL Open Font License 1.1 · 앱 아이콘 글자</string>
     <string name="notice_paused">자막 멈춤</string>
     <string name="notice_resumed">자막 시작</string>
     <string name="notice_mic_silenced">차 마이크 중단</string>

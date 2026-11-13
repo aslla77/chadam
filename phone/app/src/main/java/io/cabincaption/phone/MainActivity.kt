@@ -58,7 +58,7 @@ import kotlin.concurrent.thread
  */
 class MainActivity : Activity() {
 
-    private enum class Screen { START, SCAN, CONSENT, CONNECTING, TALK, THEME }
+    private enum class Screen { START, SCAN, CONSENT, CONNECTING, TALK, THEME, SETTINGS, PRIVACY, LICENSES, NAME }
 
     private var screen = Screen.START
     private var openingVisible = true
@@ -67,6 +67,8 @@ class MainActivity : Activity() {
     private val endOpening = Runnable { dismissOpening() }
     private var openingView: LinearLayout? = null
     private var pendingJoin: JoinUri? = null
+    private var askName = false
+    private var nameBack = Screen.START
     private var session: PhoneSession? = null
     @Volatile
     private var generation = 0
@@ -97,7 +99,19 @@ class MainActivity : Activity() {
     private var pal = Themes.palette(themeId)
 
     private lateinit var plain: View
-    private lateinit var appTitle: View
+    private lateinit var header: View
+    private lateinit var headerTitle: TextView
+    private lateinit var backButton: View
+    private lateinit var gearButton: View
+    private lateinit var settingsPanel: View
+    private lateinit var privacyPanel: View
+    private lateinit var licensesPanel: View
+    private lateinit var namePanel: View
+    private lateinit var homeNameValue: TextView
+    private lateinit var settingsNameValue: TextView
+    private lateinit var nameEdit: EditText
+    private lateinit var nameSave: Button
+    private lateinit var agreeButton: Button
     private lateinit var startPanel: View
     private lateinit var qrIcon: View
     private lateinit var themePanel: View
@@ -190,7 +204,9 @@ class MainActivity : Activity() {
 
     private fun onBack() {
         when (screen) {
-            Screen.SCAN, Screen.CONSENT, Screen.THEME -> show(Screen.START)
+            Screen.SCAN, Screen.CONSENT, Screen.SETTINGS -> show(Screen.START)
+            Screen.THEME, Screen.PRIVACY, Screen.LICENSES -> show(Screen.SETTINGS)
+            Screen.NAME -> show(nameBack)
             Screen.TALK, Screen.CONNECTING -> moveTaskToBack(true)
             Screen.START -> finish()
         }
@@ -283,6 +299,10 @@ class MainActivity : Activity() {
         }
         Log.i(TAG, "join link host=${j.host} port=${j.port}")
         pendingJoin = j
+        // 대화명을 정한 적이 없을 때만 동의 화면에서 묻는다. 바꾸기는 홈·설정에서
+        askName = savedName() == null
+        nameInput.setText(savedName().orEmpty())
+        syncAgree()
         show(Screen.CONSENT)
     }
 
@@ -333,11 +353,38 @@ class MainActivity : Activity() {
     private fun savedName(): String? =
         getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_NAME, null)?.takeIf(Wire::validName)
 
+    private fun saveName(name: String) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_NAME, name).apply()
+    }
+
+    private fun openName(back: Screen) {
+        nameBack = back
+        nameEdit.setText(savedName().orEmpty())
+        nameEdit.setSelection(nameEdit.text.length)
+        show(Screen.NAME)
+    }
+
+    private fun onNameSave() {
+        val name = nameEdit.text.toString().trim()
+        if (!Wire.validName(name)) return
+        saveName(name)
+        getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(nameEdit.windowToken, 0)
+        show(nameBack)
+    }
+
+    private fun syncAgree() {
+        val ok = !askName || Wire.validName(nameInput.text.toString().trim())
+        agreeButton.isEnabled = ok
+        agreeButton.alpha = if (ok) 1f else 0.4f
+    }
+
     private fun onAgree() {
         if (pendingJoin == null) return show(Screen.START)
-        val name = nameInput.text.toString().trim()
-        if (!Wire.validName(name)) return
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_NAME, name).apply()
+        if (askName) {
+            val name = nameInput.text.toString().trim()
+            if (!Wire.validName(name)) return
+            saveName(name)
+        }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
             return
@@ -616,10 +663,20 @@ class MainActivity : Activity() {
         consentPanel.visibility = vis(screen == Screen.CONSENT)
         connectingPanel.visibility = vis(screen == Screen.CONNECTING)
         themePanel.visibility = vis(screen == Screen.THEME)
+        settingsPanel.visibility = vis(screen == Screen.SETTINGS)
+        privacyPanel.visibility = vis(screen == Screen.PRIVACY)
+        licensesPanel.visibility = vis(screen == Screen.LICENSES)
+        namePanel.visibility = vis(screen == Screen.NAME)
         talkPanel.visibility = vis(screen == Screen.TALK)
         plainScroll.visibility = vis(screen != Screen.TALK)
-        appTitle.visibility = vis(screen != Screen.CONSENT && screen != Screen.THEME)
-        plain.setPadding(px(24), px(if (screen == Screen.CONSENT || screen == Screen.THEME) 40 else 72), px(24), px(32))
+        renderHeader()
+        plain.setPadding(px(20), px(if (screen == Screen.CONSENT) 40 else 12), px(20), px(32))
+        val name = savedName()
+        homeNameValue.text = name ?: getString(R.string.name_unset)
+        settingsNameValue.text = name ?: getString(R.string.name_unset)
+        nameInput.visibility = vis(askName)
+        nameSave.isEnabled = Wire.validName(nameEdit.text.toString().trim())
+        nameSave.alpha = if (nameSave.isEnabled) 1f else 0.4f
         // 차와 연결된 동안만 화면 유지(M-8). 연결이 끝나면 START로 가며 해제된다
         if (screen == Screen.TALK) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -640,6 +697,23 @@ class MainActivity : Activity() {
         if (pauseButton.isSelected != paused) stylePauseButton()
         counter.text = getString(R.string.counter, input.text.length, SayLog.MAX_CHARS)
         renderConversation()
+    }
+
+    /** 홈은 큰 앱 이름 + 설정, 하위 화면은 뒤로 + 화면 이름. 동의 화면은 머리줄이 없다. */
+    private fun renderHeader() {
+        header.visibility = vis(screen != Screen.CONSENT)
+        val sub = when (screen) {
+            Screen.SETTINGS -> R.string.settings
+            Screen.THEME -> R.string.theme_button
+            Screen.PRIVACY -> R.string.privacy
+            Screen.LICENSES -> R.string.licenses
+            Screen.NAME -> R.string.name_hint
+            else -> null
+        }
+        headerTitle.setText(sub ?: R.string.app_name)
+        headerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (sub == null) 30f else 24f)
+        backButton.visibility = vis(sub != null)
+        gearButton.visibility = vis(screen == Screen.START)
     }
 
     /** 멈춤 = 재생 아이콘 + 채움, 평소 = 멈춤 아이콘 + 테두리. */
@@ -850,6 +924,16 @@ class MainActivity : Activity() {
         return RippleDrawable(ColorStateList.valueOf(ripple(if (filled) pal.onAccent else pal.text)), content, shape(Color.BLACK, radiusDp))
     }
 
+    /** 머리줄의 테두리 없는 아이콘 버튼(뒤로·설정). */
+    private fun headerButton(kind: IconDrawable.Kind, description: Int, onClick: () -> Unit) = ImageButton(this).apply {
+        contentDescription = getString(description)
+        setPadding(px(11), px(11), px(11), px(11))
+        scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+        setImageDrawable(IconDrawable(kind, pal.text))
+        background = RippleDrawable(ColorStateList.valueOf(ripple(pal.text)), null, shape(Color.BLACK, 24))
+        setOnClickListener { onClick() }
+    }
+
     /** 대화 화면 윗줄 버튼. 글자 없이 아이콘만 보이고 스크린리더는 [description]을 읽는다. */
     private fun iconButton(kind: IconDrawable.Kind, description: String, onClick: () -> Unit) = ImageButton(this).apply {
         contentDescription = description
@@ -927,47 +1011,174 @@ class MainActivity : Activity() {
     }
 
     private fun buildStartPanel(): View {
-        qrIcon = iconView(IconDrawable.Kind.QR, pal.border)
-        val qrArea = FrameLayout(this).apply {
-            minimumHeight = px(188)
-            addView(qrIcon, FrameLayout.LayoutParams(px(148), px(148), Gravity.CENTER))
+        qrIcon = iconView(IconDrawable.Kind.QR, pal.sub)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = shape(pal.surface, 28, pal.surfaceBorder, Themes.SURFACE_BORDER_DP)
+            setPadding(px(24), px(32), px(24), px(24))
+            addView(qrIcon, LinearLayout.LayoutParams(px(104), px(104)))
+            addView(text(24f).apply { setText(R.string.connect_car); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = px(12) })
+            addView(button(getString(R.string.scan), filled = true, heightDp = 60) { onScanPressed() }, gap(16))
+        }
+        homeNameValue = text(18f).apply { typeface = Typeface.DEFAULT_BOLD }
+        val nameRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = px(64)
+            setPadding(px(20), 0, px(14), 0)
+            background = RippleDrawable(ColorStateList.valueOf(ripple(pal.text)), shape(pal.field, 20, pal.line, 1f), shape(Color.BLACK, 20))
+            isClickable = true
+            setOnClickListener { openName(Screen.START) }
+            addView(text(16f, pal.sub).apply { setText(R.string.name_hint) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(homeNameValue)
+            addView(iconView(IconDrawable.Kind.CHEVRON, pal.text), LinearLayout.LayoutParams(px(20), px(20)).apply { marginStart = px(6) })
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(qrArea, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = px(20) })
-            addView(button(getString(R.string.scan), filled = true) { onScanPressed() }, gap(20))
-            addView(button(getString(R.string.theme_button), filled = false, heightDp = 48) { show(Screen.THEME) }, gap(10))
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(nameRow, gap(16))
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+    }
+
+    private fun nameField() = EditText(this).apply {
+        setTextColor(pal.text)
+        setHintTextColor(pal.sub)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+        setHint(R.string.name_hint)
+        contentDescription = getString(R.string.name_hint)
+        filters = arrayOf(InputFilter.LengthFilter(Wire.NAME_MAX_CHARS))
+        imeOptions = EditorInfo.IME_ACTION_DONE
+        isSingleLine = true
+        minHeight = px(52)
+        background = shape(pal.field, 26, pal.border, 1f)
+        setPadding(px(18), px(10), px(18), px(10))
+        textCursorDrawable = GradientDrawable().apply { setColor(pal.text); setSize(px(2), px(22)) }
+    }
+
+    private fun afterChange(action: () -> Unit) = object : TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+        override fun afterTextChanged(s: Editable?) = action()
+    }
+
+    /** 설정 묶음 카드. 고대비 테마만 테두리가 있다. */
+    private fun group(vararg rows: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(pal.field, 20, pal.surfaceBorder, Themes.SURFACE_BORDER_DP)
+        clipToOutline = true
+        rows.forEachIndexed { i, row ->
+            if (i > 0) addView(line(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px(1)))
+            addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
+
+    private fun sectionLabel(res: Int) = text(14f, pal.sub).apply {
+        setText(res)
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(px(8), 0, px(8), px(6))
+    }
+
+    /** 설정 한 줄: 아이콘 + 이름 + 값 + (누르면) 꺾쇠. */
+    private fun settingsRow(kind: IconDrawable.Kind, label: Int, value: TextView? = null, onClick: (() -> Unit)? = null) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = px(64)
+        setPadding(px(20), 0, px(16), 0)
+        addView(iconView(kind, pal.text), LinearLayout.LayoutParams(px(22), px(22)))
+        addView(text(17f).apply { setText(label) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = px(14) })
+        if (value != null) addView(value)
+        if (onClick != null) {
+            addView(iconView(IconDrawable.Kind.CHEVRON, pal.sub), LinearLayout.LayoutParams(px(18), px(18)).apply { marginStart = px(6) })
+            background = RippleDrawable(ColorStateList.valueOf(ripple(pal.text)), null, ColorDrawable(Color.BLACK))
+            isClickable = true
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun buildSettingsPanel(): View {
+        settingsNameValue = text(17f, pal.sub)
+        val themeValue = text(17f, pal.sub).apply {
+            setText(if (themeChoice == Themes.SYSTEM) R.string.theme_system else themeName(themeId))
+        }
+        val version = text(17f, pal.sub).apply { text = BuildConfig.VERSION_NAME }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(sectionLabel(R.string.section_me), gap(12))
+            addView(group(settingsRow(IconDrawable.Kind.PERSON, R.string.name_hint, settingsNameValue) { openName(Screen.SETTINGS) }))
+            addView(sectionLabel(R.string.section_screen), gap(24))
+            addView(group(settingsRow(IconDrawable.Kind.THEME, R.string.theme_button, themeValue) { show(Screen.THEME) }))
+            addView(sectionLabel(R.string.section_info), gap(24))
+            addView(
+                group(
+                    settingsRow(IconDrawable.Kind.SHIELD, R.string.privacy) { show(Screen.PRIVACY) },
+                    settingsRow(IconDrawable.Kind.DOC, R.string.licenses) { show(Screen.LICENSES) },
+                    settingsRow(IconDrawable.Kind.INFO, R.string.version, version),
+                ),
+            )
+        }
+    }
+
+    /** 제목 + 한 줄 설명 목록(개인정보·라이선스). */
+    private fun infoList(items: List<Triple<IconDrawable.Kind?, String, String>>): View {
+        val rows = items.map { (kind, title, sub) ->
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(px(20), px(14), px(20), px(14))
+                if (kind != null) addView(iconView(kind, pal.text), LinearLayout.LayoutParams(px(28), px(28)).apply { marginEnd = px(16) })
+                addView(
+                    column(
+                        text(17f).apply { text = title; typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) },
+                        text(14f, pal.sub).apply { text = sub; setPadding(0, px(2), 0, 0) },
+                    ),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(group(*rows.toTypedArray()), gap(12))
+        }
+    }
+
+    private fun buildPrivacyPanel(): View = infoList(
+        listOf(
+            Triple(IconDrawable.Kind.MIC_OFF, getString(R.string.privacy_mic), getString(R.string.privacy_mic_sub)),
+            Triple(IconDrawable.Kind.PHONE, getString(R.string.privacy_device), getString(R.string.privacy_device_sub)),
+            Triple(IconDrawable.Kind.TRASH, getString(R.string.privacy_store), getString(R.string.privacy_store_sub)),
+            Triple(IconDrawable.Kind.PERSON, getString(R.string.privacy_name), getString(R.string.privacy_name_sub)),
+            Triple(IconDrawable.Kind.NOTICE, getString(R.string.privacy_accuracy), getString(R.string.privacy_accuracy_sub)),
+        ),
+    )
+
+    private fun buildLicensesPanel(): View = infoList(
+        listOf(
+            Triple(null, getString(R.string.license_zxing), getString(R.string.license_zxing_sub)),
+            Triple(null, getString(R.string.license_noto), getString(R.string.license_noto_sub)),
+        ),
+    )
+
+    private fun buildNamePanel(): View {
+        nameEdit = nameField().apply { addTextChangedListener(afterChange { render() }) }
+        nameSave = button(getString(R.string.save), filled = true) { onNameSave() }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(nameEdit, gap(20))
+            addView(nameSave, gap(20))
+            addView(button(getString(R.string.cancel), filled = false) { show(nameBack) }, gap(10))
         }
     }
 
     private fun buildConsentPanel(): View {
-        val agree = button(getString(R.string.agree), filled = true) { onAgree() }
-        fun syncAgree(s: CharSequence?) {
-            val ok = Wire.validName(s?.toString()?.trim())
-            agree.isEnabled = ok
-            agree.alpha = if (ok) 1f else 0.4f
-        }
-        nameInput = EditText(this).apply {
-            setTextColor(pal.text)
-            setHintTextColor(pal.sub)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setHint(R.string.name_hint)
-            contentDescription = getString(R.string.name_hint)
-            filters = arrayOf(InputFilter.LengthFilter(Wire.NAME_MAX_CHARS))
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            isSingleLine = true
-            minHeight = px(52)
-            background = shape(pal.field, 26, pal.border, 1f)
-            setPadding(px(18), px(10), px(18), px(10))
-            textCursorDrawable = GradientDrawable().apply { setColor(pal.text); setSize(px(2), px(22)) }
+        agreeButton = button(getString(R.string.agree), filled = true) { onAgree() }
+        nameInput = nameField().apply {
             setText(savedName().orEmpty())
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun afterTextChanged(s: Editable?) = syncAgree(s)
-            })
+            addTextChangedListener(afterChange { syncAgree() })
         }
-        syncAgree(nameInput.text)
+        syncAgree()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
@@ -995,7 +1206,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(nameInput, gap(20))
             addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-            addView(agree, gap(20))
+            addView(agreeButton, gap(20))
             addView(
                 button(getString(R.string.cancel), filled = false) {
                     pendingJoin = null
@@ -1008,7 +1219,6 @@ class MainActivity : Activity() {
 
     private fun buildThemePanel(): View = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        addView(text(26f).apply { setText(R.string.theme_button); typeface = Typeface.DEFAULT_BOLD })
         (listOf(Themes.SYSTEM) + ThemeId.entries.map { it.key }).forEach { key ->
             val name = getString(if (key == Themes.SYSTEM) R.string.theme_system else themeName(Themes.find(key)!!))
             val selected = key == themeChoice
@@ -1016,12 +1226,12 @@ class MainActivity : Activity() {
             addView(
                 button(if (selected) "✓  $name" else name, filled = selected) {
                     applyTheme(key)
-                    show(Screen.START)
+                    show(Screen.SETTINGS)
                 }.apply { if (selected) contentDescription = getString(R.string.theme_selected, name) },
                 gap(12),
             )
         }
-        addView(button(getString(R.string.cancel), filled = false, heightDp = 48) { show(Screen.START) }, gap(24))
+        addView(button(getString(R.string.cancel), filled = false, heightDp = 48) { show(Screen.SETTINGS) }, gap(24))
     }
 
     private fun buildTalkPanel(): View {
@@ -1132,7 +1342,17 @@ class MainActivity : Activity() {
     }
 
     private fun buildViews(): View {
-        appTitle = text(32f).apply { setText(R.string.app_name); typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) }
+        headerTitle = text(30f).apply { typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) }
+        backButton = headerButton(IconDrawable.Kind.BACK, R.string.back) { onBack() }
+        gearButton = headerButton(IconDrawable.Kind.GEAR, R.string.settings) { show(Screen.SETTINGS) }
+        header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = px(56)
+            addView(backButton, LinearLayout.LayoutParams(px(48), px(48)).apply { marginEnd = px(4) })
+            addView(headerTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(gearButton, LinearLayout.LayoutParams(px(48), px(48)))
+        }
         noticeText = text(18f).apply { setPadding(0, 0, 0, 0) }
         noticeBox = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1154,18 +1374,26 @@ class MainActivity : Activity() {
         consentPanel = buildConsentPanel()
         connectingPanel = text(22f).apply { setText(R.string.connecting) }
         themePanel = buildThemePanel()
+        settingsPanel = buildSettingsPanel()
+        privacyPanel = buildPrivacyPanel()
+        licensesPanel = buildLicensesPanel()
+        namePanel = buildNamePanel()
         talkPanel = buildTalkPanel()
         val full = ViewGroup.LayoutParams.MATCH_PARENT
         val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
         plain = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(appTitle, LinearLayout.LayoutParams(full, wrap))
+            addView(header, LinearLayout.LayoutParams(full, wrap))
             addView(noticeBox, gap(20))
             addView(startPanel, LinearLayout.LayoutParams(full, 0, 1f))
             addView(scanPanel, gap(14))
             addView(consentPanel, LinearLayout.LayoutParams(full, 0, 1f))
             addView(connectingPanel, gap(14))
-            addView(themePanel, LinearLayout.LayoutParams(full, wrap))
+            addView(themePanel, gap(12))
+            addView(settingsPanel, LinearLayout.LayoutParams(full, wrap))
+            addView(privacyPanel, LinearLayout.LayoutParams(full, wrap))
+            addView(licensesPanel, LinearLayout.LayoutParams(full, wrap))
+            addView(namePanel, LinearLayout.LayoutParams(full, wrap))
         }
         plainScroll = ScrollView(this).apply {
             isFillViewport = true
