@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">차담</string>
+    <string name="app_tagline">차에서 나누는 이야기</string>
+    <string name="session_open">세션 열기</string>
+    <string name="session_connecting">세션 연결중</string>
+    <string name="turn_off">끄기</string>
+    <string name="starting">준비 중…</string>
+    <string name="problem_driving">주행 중 열 수 없음</string>
+    <string name="problem_driving_unknown">주행 상태 확인 불가</string>
+    <string name="problem_no_host">Wi-Fi 확인</string>
+    <string name="problem_port">시작 실패</string>
+    <string name="problem_auto_off">3시간 지나 꺼짐</string>
+    <string name="phones_none">연결된 폰 없음</string>
+    <string name="phones_count">폰 %1$d/%2$d</string>
+    <string name="mic_on">차 마이크 켜짐</string>
+    <string name="mic_paused_for_speaker">차 마이크 쉼 · 스피커 재생 중</string>
+    <string name="mic_paused_for_nav">차 마이크 쉼 · 내비 안내 중</string>
+    <string name="speaker_playing">차 스피커 재생 중</string>
+    <string name="mic_no_permission">차 마이크 꺼짐 · 권한 없음</string>
+    <string name="mic_failed">차 마이크 오류 · 끄고 다시 열기</string>
+    <string name="mic_paused_by_phone">자막 멈춤</string>
+    <string name="mic_silenced">차 마이크 중단</string>
+    <string name="join_closed">주행 중 연결 불가</string>
+    <string name="notice">대화 → 폰 자막 · 저장 안 함 · 보낸 글은 스피커로 · 긴급 안내용 아님</string>
+    <string name="qr_description">폰 앱으로 찍는 참가용 QR 코드</string>
+    <string name="mic_channel">차담 세션</string>
+    <string name="mic_notification">차 마이크 사용 중</string>
+    <string name="connection_settings">연결 설정</string>
+    <string name="settings_parked_only">정차 중에만 가능</string>
+    <string name="settings_host_label">QR 주소</string>
+    <string name="settings_host_hint">비우면 자동</string>
+    <string name="settings_port_label">포트</string>
+    <string name="settings_save">저장</string>
+    <string name="settings_cancel">취소</string>
+    <string name="settings_bad_host">주소 오류</string>
+    <string name="settings_bad_port">포트 오류</string>
+</resources>
