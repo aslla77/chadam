@@ -16,6 +16,7 @@ class SessionController(
     private val listenPort: Int = LISTEN_PORT,
     private val elapsed: () -> Long = { System.nanoTime() / 1_000_000 },
     private val maxOnMs: Long = MAX_ON_MS,
+    private val localHosts: () -> List<String> = { emptyList() },
 ) {
     interface Effects {
         fun chime()
@@ -45,6 +46,7 @@ class SessionController(
         val micSilenced: Boolean,
         val nav: Boolean,
         val target: JoinTarget?,
+        val phoneList: List<PhoneEntry>,
     )
 
     @Volatile
@@ -78,13 +80,14 @@ class SessionController(
         val s = newServer()
         s.setNav(nav)
         server = s
-        runAsync { start(s, micPermitted) }
+        val bindHost = BindHost.choose(target!!.host, localHosts())
+        runAsync { start(s, bindHost, micPermitted) }
         return true
     }
 
-    private fun start(s: SessionServer, micPermitted: Boolean) {
+    private fun start(s: SessionServer, bindHost: String, micPermitted: Boolean) {
         try {
-            s.start(listenPort)
+            s.start(listenPort, bindHost)
         } catch (e: IOException) {
             synchronized(this) {
                 if (server === s) {
@@ -178,7 +181,7 @@ class SessionController(
             phase = phase,
             driving = driving,
             phones = if (on) s!!.phones() else 0,
-            qrText = if (on && t != null) t.uri(s!!.token(clock())) else null,
+            qrText = if (on && t != null) t.uri(s!!.token(clock()), s.pin()) else null,
             mic = if (mic == Mic.ON && micInput == false) Mic.FAILED else mic,
             problem = problem,
             speakerBusy = on && s!!.speakerBusy(),
@@ -186,7 +189,14 @@ class SessionController(
             micSilenced = on && s!!.micSilenced(),
             nav = on && s!!.nav(),
             target = if (on) t else null,
+            phoneList = if (on) s!!.phoneList() else emptyList(),
         )
+    }
+
+    /** 차 화면의 "내보내기"(T3). 켜져 있을 때만. 내보낸 것이 있으면 true. */
+    fun kick(member: Long): Boolean {
+        val s = synchronized(this) { if (phase == Phase.ON) server else null } ?: return false
+        return s.kick(member)
     }
 
     companion object {

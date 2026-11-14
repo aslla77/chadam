@@ -39,7 +39,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data
-                    android:host="join"
+                    android:host="join2"
                     android:scheme="cabincaption" />
             </intent-filter>
         </activity>

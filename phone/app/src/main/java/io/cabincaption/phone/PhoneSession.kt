@@ -16,7 +16,8 @@ import java.net.Socket
 import kotlin.concurrent.thread
 
 /**
- * 차 앱 한 대와의 연결(ADR-0004). QR 토큰으로 처음 붙고, 끊기면 받은 재접속 키로 다시 붙는다(키는 붙을 때마다 차가 새로 준다).
+ * 차 앱 한 대와의 TLS 1.3 연결(ADR-0004·0005). 처음·재접속 모두 QR 지문([JoinUri.pin])과 차 인증서가 맞아야 붙는다.
+ * QR 토큰으로 처음 붙고, 끊기면 받은 재접속 키로 다시 붙는다(키는 붙을 때마다 차가 새로 준다). 나가기는 bye를 보내 차가 키를 바로 버리게 한다.
  * 환영 뒤 [pingMs]마다 ping을 보내고, [peerTimeoutMs] 동안 차에서 아무것도 못 받으면 끊긴 것으로 보고 다시 붙는다.
  * 키·연결은 메모리에만 둔다. 리스너는 연결 스레드에서 불린다.
  */
@@ -29,6 +30,7 @@ class PhoneSession(
     private val pingMs: Long = Wire.PING_MS,
     private val peerTimeoutMs: Int = Wire.PEER_TIMEOUT_MS,
     private val name: String? = null,
+    private val byeGraceMs: Long = BYE_GRACE_MS,
 ) {
     enum class Status { CONNECTING, CONNECTED, RECONNECTING }
 
@@ -44,6 +46,9 @@ class PhoneSession(
 
         /** 연결이 끊긴 뒤 다시 붙지 못함(차가 꺼졌거나 키가 무효). */
         LOST,
+
+        /** 차 화면에서 이 폰을 내보냄(kicked 수신). 다시 붙지 않는다. */
+        KICKED,
     }
 
     interface Listener {
@@ -78,6 +83,8 @@ class PhoneSession(
     private sealed interface Outcome {
         data object Off : Outcome
 
+        data object Kicked : Outcome
+
         data class Rejected(val reason: RejectReason?) : Outcome
 
         data object Dropped : Outcome
@@ -86,6 +93,7 @@ class PhoneSession(
     @Volatile
     private var left = false
 
+    /** TLS 아래 소켓. 이것을 닫으면 막힌 읽기·쓰기가 TLS 잠금을 기다리지 않고 끝난다. */
     @Volatile
     private var socket: Socket? = null
     private var out: OutputStream? = null
@@ -100,11 +108,20 @@ class PhoneSession(
         worker = thread(name = "phone-session", isDaemon = true) { run() }
     }
 
-    /** 이 폰만 빠진다. 이후 리스너는 불리지 않는다. */
+    /** 이 폰만 빠진다. 차에 bye를 보내고 차가 닫기를 [byeGraceMs]까지 기다린 뒤 닫는다. 이후 리스너는 불리지 않는다. 메인 스레드에서 불러도 된다. */
     fun leave() {
         left = true
-        worker?.interrupt()
-        closeQuietly(socket)
+        val w = worker
+        w?.interrupt()
+        val s = socket
+        thread(name = "phone-bye", isDaemon = true) { send(Wire.bye()) }
+        thread(name = "phone-leave", isDaemon = true) {
+            try {
+                w?.join(byeGraceMs)
+            } catch (_: InterruptedException) {
+            }
+            closeQuietly(s)
+        }
     }
 
     /** 글자 음성(PCM16 mono)을 차로 보낸다. [text]를 함께 보내면 차가 읽을 때 다른 폰에도 보인다. 연결이 없거나 쓰다 끊기면 false. */
@@ -154,6 +171,7 @@ class PhoneSession(
             if (left) return
             when (o) {
                 Outcome.Off -> return end(End.CAR_OFF, null)
+                Outcome.Kicked -> return end(End.KICKED, null)
                 is Outcome.Rejected -> return end(if (key == null) End.REJECTED else End.LOST, o.reason)
                 Outcome.Dropped -> {
                     if (key == null) return end(End.UNREACHABLE, null)
@@ -179,8 +197,9 @@ class PhoneSession(
             s.connect(InetSocketAddress(join.host, join.port), connectTimeoutMs)
             s.tcpNoDelay = true
             s.soTimeout = welcomeTimeoutMs
-            val input = BufferedInputStream(s.getInputStream())
-            val o = s.getOutputStream()
+            val tls = PinnedTls.wrap(s, join.host, join.port, join.pin)
+            val input = BufferedInputStream(tls.inputStream)
+            val o = tls.outputStream
             val k = key
             val who = if (k != null) mapOf(Wire.KEY to k) else mapOf(Wire.TOKEN to join.token)
             FrameCodec.write(o, Wire.hello(if (name != null) who + (Wire.NAME to name) else who))
@@ -208,6 +227,7 @@ class PhoneSession(
                     }
                     Wire.REJECT -> return Outcome.Rejected(RejectReason.of(m[Wire.REASON]))
                     Wire.OFF -> return Outcome.Off
+                    Wire.KICKED -> if (welcomed) return Outcome.Kicked
                     Wire.SAID -> {
                         val id = m[Wire.ID]
                         val st = SayState.of(m[Wire.STATE])
@@ -279,6 +299,9 @@ class PhoneSession(
 
     private companion object {
         val RETRY_DELAYS_MS = listOf(500L, 1_000L, 1_000L, 2_000L, 2_000L, 2_000L, 2_000L, 2_000L)
+
+        /** bye 뒤 차가 연결을 닫기를 기다리는 시간. 그 뒤엔 우리가 닫는다. */
+        const val BYE_GRACE_MS = 500L
 
         fun closeQuietly(s: Socket?) {
             try {

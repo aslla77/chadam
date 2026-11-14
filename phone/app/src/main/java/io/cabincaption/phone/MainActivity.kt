@@ -115,6 +115,7 @@ class MainActivity : Activity() {
     private lateinit var nameEdit: EditText
     private lateinit var nameSave: Button
     private lateinit var agreeButton: Button
+    private lateinit var consentAddress: TextView
     private lateinit var contentView: View
     private lateinit var tutorialPanel: View
     private lateinit var tutorialArt: FrameLayout
@@ -457,6 +458,7 @@ class MainActivity : Activity() {
                 End.UNREACHABLE -> getString(R.string.unreachable)
                 End.CAR_OFF -> getString(R.string.car_off)
                 End.LOST -> getString(R.string.lost)
+                End.KICKED -> getString(R.string.kicked)
             }
             endSession()
             show(Screen.START)
@@ -714,6 +716,7 @@ class MainActivity : Activity() {
         if (screen == Screen.TALK) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         noticeText.text = notice ?: ""
+        consentAddress.text = pendingJoin?.hostPort().orEmpty()
         noticeBox.visibility = vis(notice != null && screen == Screen.START)
         qrIcon.visibility = vis(notice == null)
         statusText.text = getString(if (status == Status.RECONNECTING) R.string.reconnecting else R.string.connected)
@@ -1416,6 +1419,7 @@ class MainActivity : Activity() {
     private fun buildLicensesPanel(): View = infoList(
         listOf(
             Triple(null, getString(R.string.license_zxing), getString(R.string.license_zxing_sub)),
+            Triple(null, getString(R.string.license_kotlin), getString(R.string.license_kotlin_sub)),
             Triple(null, getString(R.string.license_noto), getString(R.string.license_noto_sub)),
         ),
     )
@@ -1433,6 +1437,7 @@ class MainActivity : Activity() {
 
     private fun buildConsentPanel(): View {
         agreeButton = button(getString(R.string.agree), filled = true) { onAgree() }
+        consentAddress = text(15f, pal.sub).apply { gravity = Gravity.CENTER; typeface = Typeface.MONOSPACE }
         nameInput = nameField().apply {
             setText(savedName().orEmpty())
             addTextChangedListener(afterChange { syncAgree() })
@@ -1463,6 +1468,7 @@ class MainActivity : Activity() {
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            addView(consentAddress, gap(12))
             addView(nameInput, gap(20))
             addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(agreeButton, gap(20))

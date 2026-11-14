@@ -86,6 +86,13 @@ class WireTest {
     }
 
     @Test
+    fun byeIsACtrlWithOnlyItsType() {
+        val f = Wire.bye()
+        assertEquals(FrameType.CTRL, f.type)
+        assertEquals(mapOf("t" to "bye"), Ctrl.decode(f.body))
+    }
+
+    @Test
     fun flagsAcceptOnlyZeroOrOne() {
         assertEquals(true, Wire.parseFlag("1"))
         assertEquals(false, Wire.parseFlag("0"))

@@ -11,7 +11,7 @@ class QrMatrixTest {
 
     @Test
     fun encodedQrDecodesBackToTheSameUri() {
-        val uri = JoinTarget("10.2.52.88", 47100).uri("Zm9vYmFyYmF6cXV4MTIzNA")
+        val uri = JoinTarget("10.2.52.88", 47100).uri("Zm9vYmFyYmF6cXV4MTIzNA", "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0")
         val m = QrMatrix.encode(uri)
         val scale = 4
         val size = m.width * scale

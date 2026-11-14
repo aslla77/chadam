@@ -40,6 +40,7 @@ object CarRuntime {
                 runAsync = { job -> worker.execute(job) },
                 // 서버 정리는 켜기 실행기와 따로 돌린다: 정리가 늦어도 다시 켜기가 막히지 않는다(H-2)
                 runStop = { job -> thread(name = "car-stop", isDaemon = true) { job() } },
+                localHosts = BindHost::localIpv4,
             )
             Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "car-auto-off").apply { isDaemon = true } }
                 .scheduleWithFixedDelay({ if (c.expireIfDue()) Log.i(TAG, "auto off after ${SessionController.MAX_ON_MS}ms") }, 1, 1, TimeUnit.MINUTES)

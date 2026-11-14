@@ -8,12 +8,15 @@ import io.cabincaption.protocol.FrameType
 import io.cabincaption.protocol.ProtocolException
 import io.cabincaption.protocol.RejectReason
 import io.cabincaption.protocol.SayState
+import io.cabincaption.protocol.Tls
 import io.cabincaption.protocol.Wire
 import java.io.BufferedInputStream
 import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.GeneralSecurityException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -22,11 +25,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import kotlin.concurrent.thread
 
 interface SessionServer {
-    /** 포트를 열고 실제로 열린 포트를 돌려준다. 실패하거나 이미 끈 서버면 IOException. */
-    fun start(port: Int): Int
+    /** [bindHost]의 포트를 열고 실제로 열린 포트를 돌려준다. 실패하거나 이미 끈 서버면 IOException. */
+    fun start(port: Int, bindHost: String): Int
+
+    /** 이 세션 TLS 공개키 지문(QR `f`). 세션마다 다르다. */
+    fun pin(): String
 
     /** 모든 연결에 OFF를 보내 보고(짧게 기다림) 무조건 닫은 뒤 토큰·키·연결 기록을 지운다. 멈춘 폰이 있어도 곧 돌아온다. */
     fun stop()
@@ -56,15 +64,26 @@ interface SessionServer {
     fun nav(): Boolean
 
     fun micSilenced(): Boolean
+
+    /** 지금 연결된 폰(차 화면 목록, T3). 들어온 순서. */
+    fun phoneList(): List<PhoneEntry>
+
+    /** 폰 [member]를 내보낸다: 그 폰에 kicked를 보내고 연결을 닫고 재접속 키를 버린다(재입장은 새 QR로만). 내보낸 것이 있으면 true. */
+    fun kick(member: Long): Boolean
 }
 
+/** [member]는 재접속해도 같은 폰이면 같은 번호. [name]은 폰이 보낸 대화명([Wire.validName]을 통과한 것만). */
+data class PhoneEntry(val member: Long, val name: String?)
+
 /**
- * 차 앱의 TCP 서버(ADR-0004). 켜져 있는 동안만 포트를 연다. 저장 없음. 폰이 보낸 소리는 [speaker] 큐로 재생한다.
+ * 차 앱의 TLS 1.3 서버(ADR-0004·0005). 켜져 있는 동안만 [start]에서 받은 주소 하나에 포트를 연다. 키는 [identity]로 세션마다 새로 만든다. 저장 없음. 폰이 보낸 소리는 [speaker] 큐로 재생한다.
  * 차 마이크 청크는 [UploadGate] 조건이 맞을 때만 모든 폰에 보낸다.
  * 보내기는 폰마다 [SendQueue] + 전용 스레드라서 느린 폰 하나가 캡처·다른 폰·재생 스레드를 막지 않는다(ADR-0004 결정 5).
  * 살아 있음: [pingMs]마다 ping을 보내고, [peerTimeoutMs] 동안 아무것도 못 받거나 쓰기가 [writeTimeoutMs] 넘게 막히면 끊는다.
  * 단톡방식 공유: 폰이 보낸 글은 차 스피커에서 소리가 처음 난 뒤(onAudible) 보낸 폰을 뺀 모든 폰에 한 번 보낸다. 글 내용은 로그에 남기지 않는다.
  * 소리 없이 보내기(note): [speaker]·업로드 조건을 거치지 않고 받자마자 다른 폰에 보낸다.
+ * 소켓 자리(T4): HELLO 전 연결은 [maxPending]개까지 두고 넘치면 가장 오래된 것을 닫는다. 인증된 연결은 [maxAuthed]개까지 따로 센다.
+ * 빈도 제한(T5): 연결마다 note·say·pause를 [RateLimit]([rateBurst]개, [rateRefillMs]마다 1개)로 막는다.
  */
 class CarServer(
     private val lobby: Lobby,
@@ -73,17 +92,21 @@ class CarServer(
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
     private val helloTimeoutMs: Int = 5_000,
-    private val maxSockets: Int = Lobby.MAX_PHONES + 4,
+    private val maxPending: Int = MAX_PENDING,
+    private val maxAuthed: Int = Lobby.MAX_PHONES + REJOIN_SPARE,
     private val pingMs: Long = Wire.PING_MS,
     private val peerTimeoutMs: Int = Wire.PEER_TIMEOUT_MS,
     private val writeTimeoutMs: Long = WRITE_TIMEOUT_MS,
     private val offGraceMs: Long = OFF_GRACE_MS,
     private val audioBacklog: Int = SendQueue.MAX_AUDIO,
+    private val identity: TlsIdentity = TlsIdentity.create(),
+    private val rateBurst: Int = RateLimit.BURST,
+    private val rateRefillMs: Long = RateLimit.REFILL_MS,
 ) : SessionServer {
 
-    /** [member] = 재접속해도 같은 폰이면 같은 번호([Admit.Accepted.member]). */
-    private inner class Conn(val id: Long, private val socket: Socket, val member: Long, val name: String?) {
-        private val out = socket.getOutputStream()
+    /** [member] = 재접속해도 같은 폰이면 같은 번호([Admit.Accepted.member]). [raw]를 닫으면 막힌 읽기·쓰기가 TLS 잠금을 기다리지 않고 바로 끝난다. */
+    private inner class Conn(val id: Long, private val raw: Socket, private val tls: SSLSocket, val member: Long, val name: String?) {
+        private val out = tls.outputStream
         private val queue = SendQueue(audioBacklog)
         private val writer = thread(start = false, name = "car-send", isDaemon = true) { writeLoop() }
 
@@ -91,6 +114,13 @@ class CarServer(
         private var writingSince = NOT_WRITING
 
         val droppedAudio: Long get() = queue.droppedAudio
+
+        val noteLimit = RateLimit(rateBurst, rateRefillMs)
+        val sayLimit = RateLimit(rateBurst, rateRefillMs)
+        val pauseLimit = RateLimit(rateBurst, rateRefillMs)
+
+        /** 빈도 제한으로 버린 수(note·say·pause 합). 연결이 끝날 때 한 번 남긴다. */
+        var rateDropped = 0
 
         fun begin() = writer.start()
 
@@ -118,7 +148,7 @@ class CarServer(
             } catch (_: IOException) {
             } catch (_: InterruptedException) {
             } finally {
-                closeQuietly(socket)
+                closeQuietly(tls)
             }
         }
 
@@ -136,17 +166,21 @@ class CarServer(
 
         fun close() {
             queue.close()
-            closeQuietly(socket)
+            closeQuietly(raw)
         }
     }
 
     private var serverSocket: ServerSocket? = null
+    private var tlsFactory: SSLSocketFactory? = null
     private var timer: ScheduledExecutorService? = null
     private var stopped = false
     private val conns = ConcurrentHashMap<Long, Conn>()
     private val nextId = AtomicLong()
     private val nextShareId = AtomicLong()
-    private val open = AtomicInteger()
+    /** HELLO 전 연결. 들어온 순서라 첫 원소가 가장 오래된 것이다. */
+    private val pending = LinkedHashSet<Socket>()
+    private val authed = AtomicInteger()
+    private val evicted = AtomicLong()
     private val gate = UploadGate()
 
     @Volatile
@@ -173,13 +207,18 @@ class CarServer(
     }
 
     @Synchronized
-    override fun start(port: Int): Int {
+    override fun start(port: Int, bindHost: String): Int {
         if (stopped) throw IOException("server stopped")
         check(serverSocket == null) { "server already used" }
+        tlsFactory = try {
+            identity.serverContext().socketFactory
+        } catch (e: GeneralSecurityException) {
+            throw IOException("tls unavailable: ${e.javaClass.simpleName}")
+        }
         val ss = ServerSocket()
         try {
             ss.reuseAddress = true
-            ss.bind(InetSocketAddress(port))
+            ss.bind(InetSocketAddress(InetAddress.getByName(bindHost), port))
         } catch (e: IOException) {
             closeQuietly(ss)
             throw e
@@ -191,9 +230,11 @@ class CarServer(
         t.scheduleWithFixedDelay({ watchWrites() }, watchMs, watchMs, TimeUnit.MILLISECONDS)
         timer = t
         thread(name = "car-accept", isDaemon = true) { acceptLoop(ss) }
-        log("listening port=${ss.localPort}")
+        log("listening ${if (bindHost == BindHost.LOOPBACK) "loopback" else "qr host"} port=${ss.localPort} tls=${Tls.PROTOCOL} pin chars=${identity.pin.length}")
         return ss.localPort
     }
+
+    override fun pin(): String = identity.pin
 
     private fun heartbeat() {
         val f = Wire.ping()
@@ -218,11 +259,14 @@ class CarServer(
             } catch (e: IOException) {
                 break
             }
-            if (open.incrementAndGet() > maxSockets) {
-                open.decrementAndGet()
-                closeQuietly(s)
-                log("refused: too many sockets")
-                continue
+            // 거절 대신 가장 오래된 HELLO 전 연결을 닫는다: 빈 연결로 버티는 쪽보다 곧 HELLO를 보낼 재접속 폰이 자리를 얻는다
+            val oldest = synchronized(pending) {
+                pending.add(s)
+                if (pending.size > maxPending) pending.first().also { pending.remove(it) } else null
+            }
+            if (oldest != null) {
+                closeQuietly(oldest)
+                evicted.incrementAndGet()
             }
             thread(name = "car-conn", isDaemon = true) { serve(s) }
         }
@@ -232,7 +276,9 @@ class CarServer(
         val id = nextId.incrementAndGet()
         var key: String? = null
         var conn: Conn? = null
-        // HELLO 전체 마감(M-1): soTimeout은 read() 한 번에만 걸리므로, 조금씩 보내며 버티는 연결은 이 예약이 닫는다
+        var bye = false
+        var seated = false
+        // HELLO 전체 마감(M-1): soTimeout은 read() 한 번에만 걸리므로, 조금씩 보내며 버티는 연결은 이 예약이 닫는다. TLS 핸드셰이크도 이 안에 든다
         val deadline = try {
             synchronized(this) { timer }?.schedule({ closeQuietly(s) }, helloTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
         } catch (_: RejectedExecutionException) {
@@ -244,9 +290,16 @@ class CarServer(
             // 커널 송신 버퍼도 약 1초 분량으로 둔다: 큰 버퍼는 느린 폰에 몇 초 묵은 소리를 쌓는다(ADR-0004 결정 5의 1초)
             s.sendBufferSize = SEND_BUFFER_BYTES
             s.soTimeout = helloTimeoutMs
-            val input = BufferedInputStream(s.getInputStream())
+            val factory = synchronized(this) { tlsFactory } ?: return
+            val tls = (factory.createSocket(s, s.inetAddress.hostAddress, s.port, true) as SSLSocket).apply {
+                useClientMode = false
+                enabledProtocols = arrayOf(Tls.PROTOCOL)
+            }
+            tls.startHandshake()
+            val input = BufferedInputStream(tls.inputStream)
             val hello = FrameCodec.read(input, Wire.HELLO_MAX_BODY) ?: return
             if (!deadline.cancel(false)) return
+            synchronized(pending) { pending.remove(s) }
             if (hello.type != FrameType.HELLO) {
                 log("conn=$id closed: first frame ${hello.type}")
                 return
@@ -254,18 +307,24 @@ class CarServer(
             val fields = try {
                 Ctrl.decode(hello.body)
             } catch (e: ProtocolException) {
-                FrameCodec.write(s.getOutputStream(), reject(RejectReason.INVALID))
+                FrameCodec.write(tls.outputStream, reject(RejectReason.INVALID))
                 return
             }
-            val admit = if (isStopped()) Admit.Rejected(RejectReason.INVALID) else lobby.admit(fields, id, isDriving(), clock())
+            seated = true
+            val seatFree = authed.incrementAndGet() <= maxAuthed
+            val admit = when {
+                isStopped() -> Admit.Rejected(RejectReason.INVALID)
+                !seatFree -> Admit.Rejected(RejectReason.FULL)
+                else -> lobby.admit(fields, id, isDriving(), clock())
+            }
             when (admit) {
                 is Admit.Rejected -> {
                     log("conn=$id rejected ${admit.reason.wire}")
-                    FrameCodec.write(s.getOutputStream(), reject(admit.reason))
+                    FrameCodec.write(tls.outputStream, reject(admit.reason))
                 }
                 is Admit.Accepted -> {
                     key = admit.key
-                    val c = Conn(id, s, admit.member, fields[Wire.NAME]?.takeIf(Wire::validName))
+                    val c = Conn(id, s, tls, admit.member, fields[Wire.NAME]?.takeIf(Wire::validName))
                     conn = c
                     // 줄에 먼저 넣고 등록한다: 환영보다 먼저 오디오가 나가지 않는다
                     c.send(Wire.ctrl(Wire.TYPE to Wire.WELCOME, Wire.KEY to admit.key))
@@ -273,33 +332,37 @@ class CarServer(
                     c.send(Wire.pause(paused))
                     c.send(Wire.nav(nav))
                     if (speaker.busy) c.send(Wire.speaker(true))
-                    if (!register(c)) return
+                    if (!register(c, admit.key)) return
                     c.begin()
                     admit.replacedConn?.let { conns.remove(it)?.close() }
                     log("conn=$id accepted phones=${lobby.phones()} rejoin=${admit.rejoin}")
                     s.soTimeout = peerTimeoutMs
-                    session(c, input)
+                    bye = session(c, input)
+                    if (bye) log("conn=$id bye")
                 }
             }
         } catch (e: IOException) {
             log("conn=$id closed: ${e.javaClass.simpleName}")
         } finally {
             deadline?.cancel(false)
+            synchronized(pending) { pending.remove(s) }
             conn?.let { c ->
                 conns.remove(id, c)
                 c.close()
                 if (c.droppedAudio > 0) log("conn=$id audio dropped=${c.droppedAudio} (slow phone)")
+                if (c.rateDropped > 0) log("conn=$id rate limited dropped=${c.rateDropped}")
             }
-            key?.let { lobby.left(it, id, clock()) }
+            key?.let { if (bye) lobby.bye(it, id) else lobby.left(it, id, clock()) }
             closeQuietly(s)
-            open.decrementAndGet()
+            if (seated) authed.decrementAndGet()
         }
     }
 
-    private fun session(conn: Conn, input: BufferedInputStream) {
+    /** 폰이 bye를 보내면 true, 그 밖에 연결이 끝나면 false(또는 IOException). */
+    private fun session(conn: Conn, input: BufferedInputStream): Boolean {
         val asm = UtteranceAssembler()
         while (true) {
-            val f = FrameCodec.read(input) ?: return
+            val f = FrameCodec.read(input) ?: return false
             val result = when (f.type) {
                 FrameType.PHONE_PCM -> asm.pcm(f.body)
                 FrameType.CTRL -> {
@@ -308,7 +371,7 @@ class CarServer(
                         Wire.SAY -> asm.start(m)
                         Wire.SAY_END -> asm.end(m)
                         Wire.PAUSE -> {
-                            Wire.parseFlag(m[Wire.ON])?.let { setPaused(it, conn.id) }
+                            if (conn.pauseLimit.take()) Wire.parseFlag(m[Wire.ON])?.let { setPaused(it, conn.id) } else conn.rateDropped++
                             UtteranceAssembler.Result.Ignored
                         }
                         Wire.NOTE -> {
@@ -319,13 +382,18 @@ class CarServer(
                             conn.send(Wire.clockPong(clock()))
                             UtteranceAssembler.Result.Ignored
                         }
+                        Wire.BYE -> return true
                         else -> UtteranceAssembler.Result.Ignored
                     }
                 }
                 else -> UtteranceAssembler.Result.Ignored
             }
             when (result) {
-                is UtteranceAssembler.Result.Ready -> {
+                // 다 받은 문장 단위로 센다: say 시작에서 버리면 뒤따르는 PCM이 앞 문장에 섞일 수 있다
+                is UtteranceAssembler.Result.Ready -> if (!conn.sayLimit.take()) {
+                    conn.rateDropped++
+                    conn.send(Wire.said(result.utterance.id, SayState.FAILED, SpeakerQueue.REASON_BUSY))
+                } else {
                     val u = result.utterance
                     val text = u.text
                     log("conn=${conn.id} say id=${u.id} received rate=${u.rate} frames=${u.pcm.size / 2} chars=${text?.length ?: 0}")
@@ -354,6 +422,11 @@ class CarServer(
 
     private fun note(from: Conn, fields: Map<String, String>) {
         val id = fields[Wire.ID]?.takeIf(Wire::validId) ?: return log("conn=${from.id} note ignored: bad id")
+        if (!from.noteLimit.take()) {
+            from.rateDropped++
+            from.send(Wire.said(id, SayState.FAILED, SpeakerQueue.REASON_BUSY))
+            return
+        }
         val text = fields[Wire.TEXT]
         if (text == null || !Wire.validText(text)) {
             log("conn=${from.id} note id=$id dropped: ${UtteranceAssembler.REASON_BAD_FORMAT} chars=${text?.length ?: 0}")
@@ -437,10 +510,37 @@ class CarServer(
     // Kotlin toList()는 크기 1이면 size를 본 뒤 next()를 불러, 그사이 연결이 빠지면 NoSuchElementException을 던진다
     private fun connections(): List<Conn> = ArrayList(conns.values)
 
+    /** 등록 전에 내보내졌으면(키가 이미 이 연결 것이 아님) false. [kick]과 같은 잠금이라 빠뜨리지 않는다. */
     @Synchronized
-    private fun register(conn: Conn): Boolean {
-        if (stopped) return false
+    private fun register(conn: Conn, key: String): Boolean {
+        if (stopped || !lobby.holds(key, conn.id)) return false
         conns[conn.id] = conn
+        return true
+    }
+
+    override fun phoneList(): List<PhoneEntry> =
+        connections().sortedBy { it.member }.distinctBy { it.member }.map { PhoneEntry(it.member, it.name) }
+
+    override fun kick(member: Long): Boolean {
+        val gone: List<Conn>
+        val t: ScheduledExecutorService?
+        synchronized(this) {
+            if (stopped) return false
+            val forgot = lobby.kick(member)
+            gone = connections().filter { it.member == member }
+            gone.forEach { conns.remove(it.id, it) }
+            if (!forgot && gone.isEmpty()) return false
+            t = timer
+        }
+        val f = Wire.kicked()
+        gone.forEach { it.finish(f) }
+        // 폰이 받지 않아 보내기가 막혀도 잠시 뒤 닫는다
+        try {
+            t?.schedule({ gone.forEach { it.close() } }, offGraceMs, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {
+            gone.forEach { it.close() }
+        }
+        log("kicked member=$member conns=${gone.size} phones=${lobby.phones()}")
         return true
     }
 
@@ -465,7 +565,7 @@ class CarServer(
         snapshot.forEach { it.close() }
         lobby.clear()
         log("upload final ${gate.counters()}")
-        log("stopped, closed ${snapshot.size} connections (off not confirmed=$unsent)")
+        log("stopped, closed ${snapshot.size} connections (off not confirmed=$unsent) pending evicted=${evicted.get()}")
     }
 
     override fun phones(): Int = lobby.phones()
@@ -490,6 +590,12 @@ class CarServer(
 
         /** 끄기 때 off를 보내 보는 시간. 그 뒤엔 보냈든 못 보냈든 닫는다. */
         const val OFF_GRACE_MS = 500L
+
+        /** HELLO 전 연결 상한(T4). 넘치면 가장 오래된 것을 닫는다. */
+        const val MAX_PENDING = 8
+
+        /** 재접속 때 옛 연결이 닫히기 전 잠시 겹치는 자리. 인증된 연결 상한 = 정원 + 이것. */
+        const val REJOIN_SPARE = 4
 
         /** 32KB ≈ 차 마이크 1초(16kHz × 2B). */
         const val SEND_BUFFER_BYTES = 32 * 1024

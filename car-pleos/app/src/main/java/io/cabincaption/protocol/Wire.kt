@@ -13,6 +13,8 @@ package io.cabincaption.protocol
  * 차 마이크 → 폰: CAR_PCM([CarChunk]: 순번·캡처 시각 + 100ms PCM16 16kHz mono). 상태는 {t:mic,silenced:1|0,input:1|0}(모든 폰).
  * 자막 멈춤: 폰 → 차 {t:pause,on:1|0}, 차 → 모든 폰 {t:pause,on:1|0}. 시계 맞추기: 폰 → 차 {t:clock}, 차 → 그 폰 {t:clock,now:<차 ms>}.
  * 살아 있음: 환영 뒤 양쪽이 [PING_MS]마다 {t:ping}을 보내고, [PEER_TIMEOUT_MS] 동안 아무 프레임도 못 받으면 끊긴 것으로 본다.
+ * 나가기: 폰 → 차 {t:bye}. 차는 그 연결의 재접속 키를 바로 버리고 연결을 닫는다.
+ * 내보내기: 차 → 그 폰 {t:kicked}. 차가 그 폰의 재접속 키를 버리고 연결을 닫는다. 폰은 다시 붙지 않는다(재입장은 새 QR로만).
  */
 object Wire {
     const val TYPE = "t"
@@ -43,6 +45,8 @@ object Wire {
     const val NAV = "nav"
     const val SHARED = "shared"
     const val NOTE = "note"
+    const val BYE = "bye"
+    const val KICKED = "kicked"
 
     /** said reason: 내비 안내 때문에 기다림/실패, 통화 중이라 실패, note를 받을 폰이 없음. */
     const val SAID_NAV = "nav"
@@ -117,6 +121,10 @@ object Wire {
     fun clockPong(now: Long) = ctrl(TYPE to CLOCK, NOW to now.toString())
 
     fun ping() = ctrl(TYPE to PING)
+
+    fun bye() = ctrl(TYPE to BYE)
+
+    fun kicked() = ctrl(TYPE to KICKED)
 
     fun flag(on: Boolean) = if (on) "1" else "0"
 

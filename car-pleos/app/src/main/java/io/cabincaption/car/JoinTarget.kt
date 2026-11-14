@@ -2,7 +2,10 @@ package io.cabincaption.car
 
 import java.net.URLEncoder
 
-/** QR에 넣을 주소. IPv4만 받고, 폰이 닿을 수 없는 루프백·에뮬 내부(10.0.2.x)·링크 로컬과 선행 0(8진수로 읽힐 수 있음)은 거부한다(017 레드팀 C8). */
+/**
+ * QR에 넣을 주소. 폰 `JoinUri`와 같은 RFC 1918 사설 IPv4(10/8, 172.16/12, 192.168/16)만 받는다(T7).
+ * 그 안에서도 에뮬 내부(10.0.2.x)와 선행 0(8진수로 읽힐 수 있음)은 거부한다(017 레드팀 C8).
+ */
 data class JoinTarget(val host: String, val port: Int) {
 
     sealed interface Input {
@@ -15,14 +18,16 @@ data class JoinTarget(val host: String, val port: Int) {
     /** 화면 표시용. 토큰은 넣지 않는다. */
     fun hostPort(): String = "$host:$port"
 
-    fun uri(token: String): String =
-        "$SCHEME?h=$host&p=$port&t=${URLEncoder.encode(token, "UTF-8")}"
+    /** [pin] = 이 세션 TLS 공개키 지문(ADR-0005). 폰은 `f`가 없거나 틀리면 붙지 않는다. */
+    fun uri(token: String, pin: String): String =
+        "$SCHEME?h=$host&p=$port&t=${URLEncoder.encode(token, "UTF-8")}&f=${URLEncoder.encode(pin, "UTF-8")}"
 
     companion object {
-        const val SCHEME = "cabincaption://join"
+        // 평문 시절 폰(host "join")이 TLS 차의 QR을 받아 토큰을 평문으로 보내지 않도록 host를 바꿨다(ADR-0005)
+        const val SCHEME = "cabincaption://join2"
 
         fun parse(host: String?, port: Int): JoinTarget? {
-            if (host == null || port !in 1..65535 || !reachableIpv4(host)) return null
+            if (host == null || port !in 1..65535 || !privateIpv4(host)) return null
             return JoinTarget(host, port)
         }
 
@@ -40,16 +45,16 @@ data class JoinTarget(val host: String, val port: Int) {
             if (!configuredHost.isNullOrEmpty()) parse(configuredHost, port)
             else candidates.firstNotNullOfOrNull { parse(it, port) }
 
-        private fun reachableIpv4(host: String): Boolean {
+        private fun privateIpv4(host: String): Boolean {
             val parts = host.split('.')
             if (parts.size != 4) return false
             val o = parts.map { p -> if (p.isEmpty() || p.length > 3 || !p.all { it in '0'..'9' } || (p.length > 1 && p[0] == '0')) return false else p.toInt() }
             if (o.any { it > 255 }) return false
             return when {
-                o[0] == 0 || o[0] == 127 || o[0] >= 224 -> false
-                o[0] == 169 && o[1] == 254 -> false
-                o[0] == 10 && o[1] == 0 && o[2] == 2 -> false
-                else -> true
+                o[0] == 10 -> !(o[1] == 0 && o[2] == 2)
+                o[0] == 172 -> o[1] in 16..31
+                o[0] == 192 -> o[1] == 168
+                else -> false
             }
         }
     }

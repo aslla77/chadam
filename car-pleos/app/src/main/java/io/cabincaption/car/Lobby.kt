@@ -85,6 +85,31 @@ class Lobby(
         if (keys.containsKey(key)) keys[key] = now
     }
 
+    /** 연결 [connId]의 폰이 나가기(bye)를 보냈다. 그 키가 아직 이 연결 것이면 재접속 기한 없이 바로 버린다(T2). */
+    @Synchronized
+    fun bye(key: String, connId: Long) {
+        if (live[key] != connId) return
+        live.remove(key)
+        keys.remove(key)
+        members.remove(key)
+    }
+
+    /** 차 화면에서 폰 [member]를 내보냈다(T3). 그 폰의 재접속 키를 모두 바로 버린다. 버린 것이 있으면 true. */
+    @Synchronized
+    fun kick(member: Long): Boolean {
+        val gone = members.filterValues { it == member }.keys
+        gone.forEach {
+            keys.remove(it)
+            live.remove(it)
+            members.remove(it)
+        }
+        return gone.isNotEmpty()
+    }
+
+    /** [key]가 아직 연결 [connId]의 것인지(내보내기·재접속으로 바뀌지 않았는지). */
+    @Synchronized
+    fun holds(key: String, connId: Long): Boolean = live[key] == connId
+
     @Synchronized
     fun phones(): Int = live.size
 

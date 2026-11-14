@@ -23,7 +23,7 @@ class QrDecoderTest {
 
     @Test
     fun decodesCarJoinQrFromPaddedLumaPlane() {
-        val uri = "cabincaption://join?h=10.2.52.88&p=47100&t=AbCdEfGhIjKlMnOpQrSt_-"
+        val uri = "cabincaption://join2?h=10.2.52.88&p=47100&t=AbCdEfGhIjKlMnOpQrSt_-&f=ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
         val d = QrDecoder()
         assertEquals(uri, d.decode(frame(uri, 640, 360, 704, 300), 704, 640, 360))
         assertEquals(uri, d.decode(frame(uri, 640, 360, 640, 200), 640, 640, 360))

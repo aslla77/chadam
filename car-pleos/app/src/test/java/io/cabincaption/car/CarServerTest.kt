@@ -6,17 +6,24 @@ import io.cabincaption.protocol.Frame
 import io.cabincaption.protocol.FrameCodec
 import io.cabincaption.protocol.FrameType
 import io.cabincaption.protocol.SayState
+import io.cabincaption.protocol.Tls
 import io.cabincaption.protocol.Wire
 import java.io.BufferedInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509TrustManager
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -59,31 +66,39 @@ class CarServerTest {
 
     private val logs: MutableList<String> = CopyOnWriteArrayList<String>()
 
-    /** 기본 테스트는 ping·끊김 감시가 끼어들지 않게 길게 둔다. 살아 있음·느린 폰 테스트는 [restart]로 짧게. */
+    /**
+     * 기본 테스트는 ping·끊김 감시가 끼어들지 않게 길게 둔다. 살아 있음·느린 폰 테스트는 [restart]로 짧게.
+     * 빈도 제한은 기본 테스트에 끼어들지 않게 넉넉히 두고, 빈도 제한 테스트만 [restart]로 작게.
+     */
     private fun newServer(
         pingMs: Long = 60_000,
         peerTimeoutMs: Int = 60_000,
         writeTimeoutMs: Long = 60_000,
         audioBacklog: Int = SendQueue.MAX_AUDIO,
+        maxPending: Int = 4,
+        maxAuthed: Int = Lobby.MAX_PHONES + CarServer.REJOIN_SPARE,
+        rateBurst: Int = 1_000,
+        rateRefillMs: Long = 1,
     ) = CarServer(
         lobby, isDriving = { driving.get() }, speaker = SpeakerQueue(sink, priority, log = { logs += it }), log = { logs += it },
-        helloTimeoutMs = 1_000, maxSockets = 4, pingMs = pingMs, peerTimeoutMs = peerTimeoutMs, writeTimeoutMs = writeTimeoutMs,
-        audioBacklog = audioBacklog,
+        helloTimeoutMs = 1_000, maxPending = maxPending, maxAuthed = maxAuthed, pingMs = pingMs, peerTimeoutMs = peerTimeoutMs,
+        writeTimeoutMs = writeTimeoutMs, audioBacklog = audioBacklog, rateBurst = rateBurst, rateRefillMs = rateRefillMs,
     )
 
     @Before
     fun setUp() {
         server = newServer()
-        port = server.start(0)
+        port = server.start(0, BindHost.LOOPBACK)
     }
 
     private fun restart(
         pingMs: Long = 60_000, peerTimeoutMs: Int = 60_000, writeTimeoutMs: Long = 60_000, audioBacklog: Int = SendQueue.MAX_AUDIO, phones: Int = 2,
+        maxPending: Int = 4, maxAuthed: Int = Lobby.MAX_PHONES + CarServer.REJOIN_SPARE, rateBurst: Int = 1_000, rateRefillMs: Long = 1,
     ) {
         server.stop()
         lobby = Lobby(JoinTokens(ttlMs = 60_000), maxPhones = phones)
-        server = newServer(pingMs, peerTimeoutMs, writeTimeoutMs, audioBacklog)
-        port = server.start(0)
+        server = newServer(pingMs, peerTimeoutMs, writeTimeoutMs, audioBacklog, maxPending, maxAuthed, rateBurst, rateRefillMs)
+        port = server.start(0, BindHost.LOOPBACK)
     }
 
     @After
@@ -92,13 +107,31 @@ class CarServerTest {
         server.stop()
     }
 
+    /** 폰처럼 TLS 1.3만 쓰고 서버 인증서의 공개키 지문이 [pin]과 같을 때만 믿는다. */
+    private class PinCheck(private val pin: () -> String) : X509TrustManager {
+        override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {
+            if (chain.isEmpty() || !Tls.samePin(pin(), Tls.pin(chain[0].publicKey.encoded))) throw CertificateException("pin mismatch")
+        }
+        override fun checkClientTrusted(chain: Array<out X509Certificate>, authType: String) = throw CertificateException("unused")
+        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+
+    private fun tls(raw: Socket, pin: () -> String = { server.pin() }, protocol: String = Tls.PROTOCOL): SSLSocket {
+        val ctx = SSLContext.getInstance(protocol).apply { init(null, arrayOf(PinCheck(pin)), null) }
+        return (ctx.socketFactory.createSocket(raw, "127.0.0.1", port, true) as SSLSocket).apply {
+            enabledProtocols = arrayOf(protocol)
+            startHandshake()
+        }
+    }
+
     /** [receiveBuffer]를 작게 주고 읽지 않으면 "받지 않는 폰"이 된다. */
     private inner class Client(receiveBuffer: Int? = null) {
-        val socket = Socket().also {
+        val socket: Socket = Socket().let {
             receiveBuffer?.let { n -> it.receiveBufferSize = n }
             it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
             it.soTimeout = 3_000
             clients += it
+            tls(it)
         }
         val input: InputStream = BufferedInputStream(socket.getInputStream())
         var key: String? = null
@@ -277,6 +310,82 @@ class CarServerTest {
         waitFor { server.phones() == 1 }
         c.socket.close()
         waitFor { server.phones() == 0 }
+    }
+
+    // T2: 나가기는 재접속 키를 바로 버린다(그냥 끊김은 2분 동안 남는다)
+    @Test
+    fun byeClosesTheConnectionAndForgetsItsKeyAtOnce() {
+        val a = joined()
+        val key = a.key!!
+        a.send(Wire.bye())
+        a.assertClosed()
+        waitFor { server.phones() == 0 }
+        assertTrue(logs.toString(), logs.any { it.contains("bye") })
+        assertTrue(logs.none { it.contains(key) })
+        assertEquals("invalid", hello("key" to key).ctrl()["reason"])
+    }
+
+    @Test
+    fun plainDisconnectStillAllowsRejoinWithKey() {
+        val a = joined()
+        val key = a.key!!
+        a.socket.close()
+        waitFor { server.phones() == 0 }
+        assertEquals("welcome", hello("key" to key).ctrl()["t"])
+    }
+
+    // T1: 평문 HELLO(옛 폰)는 TLS 핸드셰이크에서 끝나고 환영을 받지 못한다
+    @Test
+    fun plaintextHelloIsNeverWelcomed() {
+        val raw = Socket().also {
+            it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+            it.soTimeout = 3_000
+            clients += it
+        }
+        FrameCodec.write(raw.getOutputStream(), Wire.hello(mapOf("token" to server.token(System.currentTimeMillis()))))
+        val first = try {
+            raw.getInputStream().read()
+        } catch (_: IOException) {
+            -1
+        }
+        assertTrue("got $first", first != FrameType.CTRL.code)
+        assertEquals(0, server.phones())
+        waitFor { logs.any { it.contains("closed: SSL") } }
+    }
+
+    @Test
+    fun clientWithAnotherPinRefusesTheCar() {
+        val raw = Socket().also {
+            it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+            it.soTimeout = 3_000
+            clients += it
+        }
+        val other = TlsIdentity.create().pin
+        assertThrows(IOException::class.java) { tls(raw, pin = { other }) }
+        assertEquals(0, server.phones())
+    }
+
+    @Test
+    fun serverAcceptsOnlyTls13() {
+        val raw = Socket().also {
+            it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+            it.soTimeout = 3_000
+            clients += it
+        }
+        assertThrows(IOException::class.java) { tls(raw, protocol = "TLSv1.2") }
+    }
+
+    @Test
+    fun pinIsPerServerAndMatchesTheCertificateSeen() {
+        val raw = Socket().also {
+            it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+            clients += it
+        }
+        val seen = Tls.pin(tls(raw).session.peerCertificates[0].publicKey.encoded)
+        assertEquals(server.pin(), seen)
+        val before = server.pin()
+        restart()
+        assertTrue(before != server.pin())
     }
 
     @Test
@@ -1060,5 +1169,145 @@ class CarServerTest {
         waitFor { a.has(said("n1", "done")) && a.has(said("s1", "done")) }
         settle(a, b)
         assertEquals(listOf("s1" to Pcm.chime(24_000).size + 8), sink.played.toList())
+    }
+
+    /** TLS도 HELLO도 보내지 않고 자리만 차지하는 연결. */
+    private fun idle(): Socket = Socket().also {
+        it.connect(InetSocketAddress("127.0.0.1", port), 2_000)
+        it.soTimeout = 3_000
+        clients += it
+    }
+
+    /** [waitMs] 안에 차가 닫았으면 true, 그때까지 열려 있으면 false. */
+    private fun Socket.closedByCar(waitMs: Int): Boolean {
+        soTimeout = waitMs
+        return try {
+            getInputStream().read() == -1
+        } catch (_: SocketTimeoutException) {
+            false
+        } catch (_: IOException) {
+            true
+        }
+    }
+
+    private fun Client.alive() {
+        send(Wire.clockPing())
+        var m = ctrl()
+        while (m["t"] != "clock") m = ctrl()
+    }
+
+    // T4: HELLO 전 연결이 꽉 차면 가장 오래된 것을 닫는다. 새 참가는 자리를 얻는다
+    @Test
+    fun fullPendingSlotsCloseTheOldestSoANewPhoneStillJoins() {
+        restart(maxPending = 2)
+        val first = idle()
+        val second = idle()
+        idle()
+        // HELLO 마감(1초)보다 짧게 본다: 마감이 아니라 밀려나서 닫힌 것
+        assertTrue(first.closedByCar(500))
+        assertFalse(second.closedByCar(200))
+        val a = joined()
+        a.alive()
+    }
+
+    // T4: 인증된 연결은 HELLO 전 연결 수와 따로 센다. 빈 연결이 쏟아져도 붙어 있는 폰과 재접속은 그대로다
+    @Test
+    fun pendingFloodDoesNotTouchAuthenticatedPhonesOrRejoin() {
+        restart(maxPending = 2)
+        val a = joined()
+        val b = joined()
+        repeat(6) { idle() }
+        a.alive()
+        b.alive()
+        assertEquals(2, server.phones())
+        b.socket.close()
+        waitFor { server.phones() == 1 }
+        repeat(6) { idle() }
+        assertEquals("welcome", hello("key" to b.key!!).ctrl()["t"])
+        waitFor { server.phones() == 2 }
+        a.alive()
+    }
+
+    // T4: 인증된 연결 자리가 없으면 full로 거절하고 토큰은 쓰지 않는다
+    @Test
+    fun authenticatedSeatsAreCappedSeparately() {
+        restart(maxAuthed = 1)
+        val a = joined()
+        val token = server.token(System.currentTimeMillis())
+        assertEquals(mapOf("t" to "reject", "reason" to "full"), hello("token" to token).ctrl())
+        a.socket.close()
+        waitFor { server.phones() == 0 }
+        // 자리는 연결 정리 끝에 돌아온다. full 거절은 토큰을 쓰지 않으므로 같은 토큰으로 다시 해 본다
+        waitFor { hello("token" to token).ctrl()["t"] == "welcome" }
+    }
+
+    // T5: 연결마다 note·say·pause가 넘치면 그 메시지만 버리고 연결은 그대로다
+    @Test
+    fun overRateMessagesAreDroppedAndTheConnectionStays() {
+        restart(rateBurst = 2, rateRefillMs = 60_000)
+        val ac = joined()
+        val a = Drain(ac)
+        val b = Drain(joined())
+        waitFor { server.phones() == 2 }
+        (1..3).forEach { ac.send(Wire.note("n$it", "글$it")) }
+        waitFor { a.has(said("n3", "failed", "busy")) }
+        assertTrue(a.has(said("n1", "done")) && a.has(said("n2", "done")))
+        (1..3).forEach { ac.say("s$it", ByteArray(4)) }
+        waitFor { a.has(said("s3", "failed", "busy")) }
+        waitFor { a.has(said("s1", "done")) && a.has(said("s2", "done")) }
+        assertEquals(listOf("s1", "s2"), sink.played.map { it.first })
+        ac.send(Wire.pause(true))
+        ac.send(Wire.pause(false))
+        ac.send(Wire.pause(true))
+        ac.send(Wire.clockPing())
+        waitFor { a.saw("clock") }
+        assertFalse(server.paused())
+        waitFor { b.ctrls.count { it["t"] == "pause" } == 2 }
+        assertEquals(listOf("1", "0"), b.ctrls.filter { it["t"] == "pause" }.map { it["on"] })
+        assertEquals(listOf("글1", "글2"), b.shared().map { it["text"] })
+        assertEquals(2, server.phones())
+        ac.socket.close()
+        waitFor { logs.any { it.contains("rate limited dropped=3") } }
+    }
+
+    // T3: 내보내면 그 폰에 kicked를 보내고 닫고 키를 버린다. 다른 폰은 그대로고, 로그에 대화명이 없다
+    @Test
+    fun kickClosesThatPhoneForgetsItsKeyAndLeavesOthers() {
+        val ac = hello("token" to server.token(System.currentTimeMillis()), "name" to "지안")
+        val aw = ac.ctrl()
+        assertEquals("welcome", aw["t"])
+        repeat(3) { ac.ctrl() }
+        val b = hello("token" to server.token(System.currentTimeMillis()))
+        val bKey = b.ctrl()["key"]!!
+        repeat(3) { b.ctrl() }
+        waitFor { server.phoneList().size == 2 }
+        val list = server.phoneList()
+        assertEquals(listOf("지안", null), list.map { it.name })
+        assertTrue(server.kick(list[0].member))
+        assertEquals(mapOf("t" to "kicked"), ac.ctrl())
+        ac.assertClosed()
+        waitFor { server.phones() == 1 }
+        assertEquals(listOf(list[1]), server.phoneList())
+        assertEquals(mapOf("t" to "reject", "reason" to "invalid"), hello("key" to aw["key"]!!).ctrl())
+        b.alive()
+        assertFalse(server.kick(list[0].member))
+        assertTrue(logs.toString(), logs.any { it.contains("kicked member=${list[0].member}") })
+        assertTrue(logs.none { it.contains("지안") || it.contains(bKey) })
+    }
+
+    @Test
+    fun kickedPhoneThatRejoinedIsStillOutAndPhoneListShowsItOnce() {
+        val a = joined()
+        a.socket.close()
+        waitFor { server.phones() == 0 }
+        val a2 = hello("key" to a.key!!)
+        val key2 = a2.ctrl()["key"]!!
+        repeat(3) { a2.ctrl() }
+        waitFor { server.phoneList().size == 1 }
+        val member = server.phoneList().single().member
+        assertTrue(server.kick(member))
+        assertEquals(mapOf("t" to "kicked"), a2.ctrl())
+        assertEquals("invalid", hello("key" to key2).ctrl()["reason"])
+        assertTrue(server.phoneList().isEmpty())
     }
 }

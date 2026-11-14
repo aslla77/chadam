@@ -31,8 +31,6 @@ import android.widget.TextView
 import io.cabincaption.car.SessionController.Mic
 import io.cabincaption.car.SessionController.Phase
 import io.cabincaption.car.SessionController.Problem
-import java.net.Inet4Address
-import java.net.NetworkInterface
 
 /** 차량 화면: 앱을 열면 정차 확인 후 세션을 자동으로 연다. 켜짐(QR·고지·상태·끄기) / 준비 중 / 끈 뒤(세션 열기). 자막은 어떤 상태에서도 그리지 않는다(ADR-0001). */
 class MainActivity : Activity() {
@@ -59,8 +57,12 @@ class MainActivity : Activity() {
     private lateinit var joinText: TextView
     private lateinit var startingText: TextView
     private lateinit var addressText: TextView
+    private lateinit var phoneRows: LinearLayout
+    private lateinit var licensesPanel: View
     private var shownQr: String? = null
+    private var shownPhones: List<PhoneEntry>? = null
     private var settingsOpen = false
+    private var licensesOpen = false
     private var settingsMessage: Int? = null
     private var autoOpenPending = false
     private var resumed = false
@@ -122,18 +124,9 @@ class MainActivity : Activity() {
 
     private fun resolveTarget(): JoinTarget? {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-        val candidates = try {
-            NetworkInterface.getNetworkInterfaces().toList()
-                .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.toList() }
-                .filterIsInstance<Inet4Address>()
-                .mapNotNull { it.hostAddress }
-        } catch (e: Exception) {
-            emptyList()
-        }
         return JoinTarget.choose(
             prefs.getString(EXTRA_HOST, null),
-            candidates,
+            BindHost.localIpv4(),
             prefs.getInt(EXTRA_PORT, SessionController.LISTEN_PORT),
         )
     }
@@ -181,7 +174,19 @@ class MainActivity : Activity() {
 
     private fun closeSettings() {
         settingsOpen = false
+        licensesOpen = false
         settingsMessage = null
+        render()
+    }
+
+    private fun showLicenses(open: Boolean) {
+        licensesOpen = open
+        render()
+    }
+
+    private fun onKick(member: Long) {
+        val kicked = controller.kick(member)
+        Log.i(TAG, "kick accepted=$kicked")
         render()
     }
 
@@ -217,11 +222,13 @@ class MainActivity : Activity() {
         val s = controller.snapshot()
         if (settingsOpen && !SessionController.canEditSettings(controller.driving, s.phase)) {
             settingsOpen = false
+            licensesOpen = false
             settingsMessage = R.string.settings_parked_only
         }
         if (settingsMessage == R.string.settings_parked_only && SessionController.canEditSettings(s.driving, s.phase)) settingsMessage = null
         offPanel.visibility = if (s.phase == Phase.OFF && !settingsOpen && !autoOpenPending) View.VISIBLE else View.GONE
-        settingsPanel.visibility = if (settingsOpen) View.VISIBLE else View.GONE
+        settingsPanel.visibility = if (settingsOpen && !licensesOpen) View.VISIBLE else View.GONE
+        licensesPanel.visibility = if (settingsOpen && licensesOpen) View.VISIBLE else View.GONE
         val waitProblem = if (autoOpenPending && openingDone) SessionController.autoOpenWait(s.driving, SystemClock.elapsedRealtime() - openingDoneAt) else null
         startingText.visibility = if ((s.phase == Phase.STARTING || autoOpenPending) && waitProblem == null) View.VISIBLE else View.GONE
         onPanel.visibility = if (s.phase == Phase.ON) View.VISIBLE else View.GONE
@@ -240,6 +247,7 @@ class MainActivity : Activity() {
         if (s.phase != Phase.ON) {
             shownQr = null
             qrImage.setImageDrawable(null)
+            showPhones(emptyList())
             return
         }
         if (s.qrText != shownQr) {
@@ -248,6 +256,7 @@ class MainActivity : Activity() {
         }
         phonesText.text = if (s.phones == 0) getString(R.string.phones_none)
         else getString(R.string.phones_count, s.phones, Lobby.MAX_PHONES)
+        showPhones(s.phoneList)
         micText.text = getString(
             when {
                 s.mic == Mic.FAILED -> R.string.mic_failed
@@ -262,6 +271,30 @@ class MainActivity : Activity() {
         speakerText.visibility = if (s.speakerBusy) View.VISIBLE else View.GONE
         addressText.text = s.target?.hostPort() ?: ""
         joinText.visibility = if (s.driving.blocksNewJoin) View.VISIBLE else View.GONE
+    }
+
+    /** 바뀔 때만 다시 만든다: 매 틱 다시 만들면 누르는 중인 버튼이 사라진다. */
+    private fun showPhones(list: List<PhoneEntry>) {
+        if (list == shownPhones) return
+        shownPhones = list
+        phoneRows.removeAllViews()
+        for (p in list) {
+            val name = p.name ?: getString(R.string.phone_unnamed)
+            phoneRows.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(text(24f).apply { text = name }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(button(R.string.kick, filled = false) { onKick(p.member) }.apply {
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                        minWidth = px(160)
+                        minHeight = px(64)
+                        contentDescription = getString(R.string.kick_description, name)
+                    })
+                },
+                wrap(8).apply { width = LinearLayout.LayoutParams.MATCH_PARENT },
+            )
+        }
     }
 
     private fun qrBitmap(text: String): Bitmap {
@@ -346,8 +379,34 @@ class MainActivity : Activity() {
             addView(field(R.string.settings_host_label, hostInput))
             addView(field(R.string.settings_port_label, portInput))
             addView(buttons)
+            addView(button(R.string.licenses, filled = false) { showLicenses(true) }.apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                minWidth = px(200)
+                minHeight = px(64)
+            }, wrap(40))
         }
         return ScrollView(this).apply { addView(form) }
+    }
+
+    private fun buildLicensesPanel(): View {
+        val grey = Color.rgb(0xBD, 0xBD, 0xBD)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(button(R.string.licenses_close, filled = false) { showLicenses(false) }.apply {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                minWidth = px(200)
+                minHeight = px(64)
+            }, wrap())
+            for ((name, sub) in LICENSES) {
+                addView(text(22f).apply { setText(name) }, wrap(16))
+                addView(text(18f, grey).apply { setText(sub) })
+            }
+            addView(text(14f, grey).apply {
+                typeface = Typeface.MONOSPACE
+                text = resources.openRawResource(R.raw.apache_license_2_0).bufferedReader().use { it.readText() }
+            }, wrap(24))
+        }
+        return ScrollView(this).apply { addView(list) }
     }
 
     private fun buildOpening(): LinearLayout = LinearLayout(this).apply {
@@ -385,6 +444,7 @@ class MainActivity : Activity() {
             }, wrap(40))
         }
         settingsPanel = buildSettingsPanel()
+        licensesPanel = buildLicensesPanel()
         startingText = text(24f).apply { setText(R.string.starting) }
         qrImage = ImageView(this).apply {
             contentDescription = getString(R.string.qr_description)
@@ -395,11 +455,13 @@ class MainActivity : Activity() {
         speakerText = text(24f).apply { setText(R.string.speaker_playing) }
         joinText = text(20f).apply { setText(R.string.join_closed) }
         addressText = text(20f)
+        phoneRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val status = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(px(32), 0, 0, 0)
             addView(text(32f).apply { setText(R.string.session_connecting); typeface = Typeface.DEFAULT_BOLD })
             addView(phonesText)
+            addView(phoneRows, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
             addView(micText)
             addView(speakerText)
             addView(joinText)
@@ -419,6 +481,7 @@ class MainActivity : Activity() {
             addView(text(32f).apply { setText(R.string.app_name) })
             addView(offPanel)
             addView(settingsPanel)
+            addView(licensesPanel)
             addView(startingText)
             addView(onPanel)
             addView(problemText)
@@ -435,5 +498,18 @@ class MainActivity : Activity() {
         const val QR_DP = 300
         const val OPENING_MS = 1_200L
         const val OPENING_FADE_MS = 200L
+
+        /** 차 release APK에 들어가는 오픈소스(security/dependency-review.md). Pleos SDK는 오픈소스가 아니라 따로 적는다. */
+        val LICENSES = listOf(
+            R.string.license_zxing to R.string.license_apache,
+            R.string.license_androidx to R.string.license_apache,
+            R.string.license_dagger to R.string.license_apache,
+            R.string.license_gson to R.string.license_apache,
+            R.string.license_kotlin to R.string.license_apache,
+            R.string.license_coroutines to R.string.license_apache,
+            R.string.license_misc to R.string.license_apache,
+            R.string.license_noto to R.string.license_noto_sub,
+            R.string.license_pleos to R.string.license_pleos_sub,
+        )
     }
 }

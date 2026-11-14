@@ -43,12 +43,15 @@ class SessionControllerTest {
         var paused = false
         var silenced = false
         var input: Boolean? = null
+        var boundTo: String? = null
         val chunks = mutableListOf<Long>()
-        override fun start(port: Int): Int {
+        override fun start(port: Int, bindHost: String): Int {
             if (failStart) throw IOException("in use")
             started++
+            boundTo = bindHost
             return port
         }
+        override fun pin() = "P".repeat(43)
         override fun stop() {
             stopped++
         }
@@ -71,6 +74,13 @@ class SessionControllerTest {
             navOn = on
         }
         override fun nav() = navOn
+        var list = listOf<PhoneEntry>()
+        val kicked = mutableListOf<Long>()
+        override fun phoneList() = list
+        override fun kick(member: Long): Boolean {
+            kicked += member
+            return true
+        }
     }
 
     private class FakeEffects(val micOk: Boolean = true) : SessionController.Effects {
@@ -99,13 +109,16 @@ class SessionControllerTest {
     private var now = 0L
 
     /** [separateStop]이면 서버 정리는 [stops]에 따로 쌓인다(실기기 CarRuntime처럼 켜기 실행기와 분리). */
-    private fun controller(failStart: Boolean = false, fx: FakeEffects = effects, separateStop: Boolean = false) = SessionController(
+    private fun controller(
+        failStart: Boolean = false, fx: FakeEffects = effects, separateStop: Boolean = false, localHosts: List<String> = emptyList(),
+    ) = SessionController(
         newServer = { FakeServer(failStart).also { servers += it } },
         effects = fx,
         clock = { 7 },
         runAsync = { pending += it },
         runStop = if (separateStop) ({ stops += it }) else ({ pending += it }),
         elapsed = { now },
+        localHosts = { localHosts },
     )
 
     private fun drain() {
@@ -141,12 +154,46 @@ class SessionControllerTest {
         drain()
         val s = c.snapshot()
         assertEquals(Phase.ON, s.phase)
-        assertEquals("cabincaption://join?h=192.168.0.10&p=47100&t=tok7", s.qrText)
+        assertEquals("cabincaption://join2?h=192.168.0.10&p=47100&t=tok7&f=${"P".repeat(43)}", s.qrText)
         assertEquals(Mic.ON, s.mic)
         assertNull(s.problem)
         assertEquals(1, effects.chimes)
         assertFalse(c.turnOn(target, true))
         assertEquals(1, servers.size)
+    }
+
+    // T8: QR 주소가 이 기기 주소면 거기에만, 아니면(에뮬 + Mac 전달기) 루프백에만 연다
+    @Test
+    fun serverBindsQrHostOnlyWhenItIsLocalOtherwiseLoopback() {
+        val local = controller(localHosts = listOf("10.0.2.15", "192.168.0.10"))
+        local.driving = DrivingState.PARKED
+        local.turnOn(target, true)
+        drain()
+        assertEquals("192.168.0.10", servers.last().boundTo)
+        val emu = controller(localHosts = listOf("10.0.2.15"))
+        emu.driving = DrivingState.PARKED
+        emu.turnOn(target, true)
+        drain()
+        assertEquals("127.0.0.1", servers.last().boundTo)
+    }
+
+    // T3: 목록과 내보내기는 켜져 있을 때만 서버로 간다
+    @Test
+    fun phoneListAndKickOnlyWhileOn() {
+        val c = controller()
+        c.driving = DrivingState.PARKED
+        assertFalse(c.kick(1))
+        c.turnOn(target, true)
+        assertFalse(c.kick(1))
+        drain()
+        servers[0].list = listOf(PhoneEntry(1, "엄마"), PhoneEntry(3, null))
+        assertEquals(servers[0].list, c.snapshot().phoneList)
+        assertTrue(c.kick(3))
+        assertEquals(listOf(3L), servers[0].kicked)
+        c.turnOff()
+        assertTrue(c.snapshot().phoneList.isEmpty())
+        assertFalse(c.kick(1))
+        assertEquals(listOf(3L), servers[0].kicked)
     }
 
     @Test

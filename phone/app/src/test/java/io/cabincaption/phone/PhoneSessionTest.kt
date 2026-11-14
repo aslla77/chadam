@@ -9,12 +9,26 @@ import io.cabincaption.protocol.FrameCodec
 import io.cabincaption.protocol.FrameType
 import io.cabincaption.protocol.RejectReason
 import io.cabincaption.protocol.SayState
+import io.cabincaption.protocol.Tls
 import io.cabincaption.protocol.Wire
 import java.io.BufferedInputStream
-import java.net.ServerSocket
+import java.io.File
+import java.io.IOException
 import java.net.Socket
+import java.security.KeyStore
+import java.security.Principal
+import java.security.PrivateKey
+import java.security.cert.X509Certificate
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509ExtendedKeyManager
+import javax.net.ssl.X509KeyManager
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -26,7 +40,25 @@ import org.junit.Test
 class PhoneSessionTest {
 
     private val token = "AbCdEfGhIjKlMnOpQrSt_-"
-    private val car = ServerSocket(0)
+
+    /** 시험용 차 키를 [alias]로 고른다. 재접속 사이에 바꾸면 "다른 차"가 된다. */
+    private class SwitchKeys(@Volatile var alias: String) : X509ExtendedKeyManager() {
+        private val km = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+            .apply { init(store, PASS.toCharArray()) }.keyManagers[0] as X509KeyManager
+        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) = alias
+        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) = alias
+        override fun getCertificateChain(alias: String?): Array<X509Certificate>? = km.getCertificateChain(alias)
+        override fun getPrivateKey(alias: String?): PrivateKey? = km.getPrivateKey(alias)
+        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = arrayOf(alias)
+        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? = null
+        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String? = null
+    }
+
+    private val keys = SwitchKeys("a")
+    private val car = (
+        SSLContext.getInstance(Tls.PROTOCOL).apply { init(arrayOf(keys), null, null) }.serverSocketFactory.createServerSocket(0) as SSLServerSocket
+        ).apply { enabledProtocols = arrayOf(Tls.PROTOCOL) }
+    private val pin = pinOf("a")
     private val events = LinkedBlockingQueue<String>()
     private var session: PhoneSession? = null
 
@@ -74,13 +106,22 @@ class PhoneSessionTest {
     private val rxTimes = LinkedBlockingQueue<Long>()
     @Volatile private var clock: Pair<Long, Long>? = null
 
-    /** 차 쪽 한 연결. */
-    private inner class Peer(val s: Socket) {
-        val input = BufferedInputStream(s.getInputStream())
+    /** 차 쪽 한 연결. 핸드셰이크를 끝낸 뒤 쓴다. */
+    private inner class Peer(val s: SSLSocket) {
         init {
             s.soTimeout = 3_000
+            s.startHandshake()
         }
+        val input = BufferedInputStream(s.getInputStream())
         fun read(): Frame = FrameCodec.read(input)!!
+        fun assertClosed() {
+            val end = try {
+                FrameCodec.read(input)
+            } catch (_: IOException) {
+                null
+            }
+            assertNull(end)
+        }
         fun hello(): Map<String, String> = read().let {
             assertEquals(FrameType.HELLO, it.type)
             Ctrl.decode(it.body)
@@ -89,12 +130,33 @@ class PhoneSessionTest {
         fun welcome(key: String = "K".repeat(22)) = send(Wire.ctrl(Wire.TYPE to Wire.WELCOME, Wire.KEY to key))
     }
 
-    private fun accept(): Peer = Peer(car.accept())
+    private fun accept(): Peer = Peer(car.accept() as SSLSocket)
+
+    /** 들어오는 연결마다 핸드셰이크만 해 보고 닫는 차. 끝난 핸드셰이크 수를 센다. */
+    private fun handshakeOnlyCar(): AtomicInteger {
+        val ok = AtomicInteger()
+        Thread {
+            try {
+                while (true) {
+                    val s = car.accept() as SSLSocket
+                    s.soTimeout = 3_000
+                    try {
+                        s.startHandshake()
+                        ok.incrementAndGet()
+                    } catch (_: IOException) {
+                    }
+                    s.close()
+                }
+            } catch (_: IOException) {
+            }
+        }.apply { isDaemon = true; start() }
+        return ok
+    }
 
     /** 기본은 ping·끊김 감시가 끼어들지 않게 길게 둔다. */
     private fun start(retries: List<Long> = listOf(50L, 50L), pingMs: Long = 60_000, peerTimeoutMs: Int = 60_000): PhoneSession =
         PhoneSession(
-            JoinUri("127.0.0.1", car.localPort, token), Recorder(), connectTimeoutMs = 1_000, welcomeTimeoutMs = 1_000, retryDelaysMs = retries,
+            JoinUri("127.0.0.1", car.localPort, token, pin), Recorder(), connectTimeoutMs = 1_000, welcomeTimeoutMs = 1_000, retryDelaysMs = retries,
             pingMs = pingMs, peerTimeoutMs = peerTimeoutMs,
         ).also { session = it; it.start() }
 
@@ -152,7 +214,7 @@ class PhoneSessionTest {
     fun unreachableCarEnds() {
         val port = car.localPort
         car.close()
-        PhoneSession(JoinUri("127.0.0.1", port, token), Recorder(), connectTimeoutMs = 500).also { session = it; it.start() }
+        PhoneSession(JoinUri("127.0.0.1", port, token, pin), Recorder(), connectTimeoutMs = 500).also { session = it; it.start() }
         assertEquals("status:CONNECTING", next())
         assertEquals("end:UNREACHABLE:null", next())
     }
@@ -163,6 +225,19 @@ class PhoneSessionTest {
         p.send(Wire.ctrl(Wire.TYPE to Wire.OFF))
         assertEquals("speaker:false", next())
         assertEquals("end:CAR_OFF:null", next())
+    }
+
+    // T3: 차가 내보내면 끝나고 키로 다시 붙지 않는다
+    @Test
+    fun kickedEndsAndNeverReconnects() {
+        val p = connected()
+        p.send(Wire.kicked())
+        p.s.close()
+        assertEquals("speaker:false", next())
+        assertEquals("end:KICKED:null", next())
+        car.soTimeout = 300
+        assertTrue(runCatching { car.accept() }.exceptionOrNull() is java.net.SocketTimeoutException)
+        assertNull(events.poll(100, TimeUnit.MILLISECONDS))
     }
 
     @Test
@@ -287,7 +362,7 @@ class PhoneSessionTest {
     @Test
     fun helloCarriesNameOnJoinAndRejoin() {
         session = PhoneSession(
-            JoinUri("127.0.0.1", car.localPort, token), Recorder(), connectTimeoutMs = 1_000, welcomeTimeoutMs = 1_000,
+            JoinUri("127.0.0.1", car.localPort, token, pin), Recorder(), connectTimeoutMs = 1_000, welcomeTimeoutMs = 1_000,
             retryDelaysMs = listOf(50L, 50L), pingMs = 60_000, peerTimeoutMs = 60_000, name = "지안",
         ).also { it.start() }
         assertEquals("status:CONNECTING", next())
@@ -323,13 +398,67 @@ class PhoneSessionTest {
         assertFalse(session!!.say("s1", 24_000, ByteArray(2)))
     }
 
+    // T2: 나가기는 bye를 보내 차가 재접속 키를 바로 버리게 하고, 차가 닫지 않아도 잠시 뒤 스스로 닫는다
     @Test
-    fun leaveClosesAndStaysSilent() {
+    fun leaveSendsByeThenClosesAndStaysSilent() {
         val p = connected()
         session!!.leave()
-        assertNull(FrameCodec.read(p.input))
+        assertEquals(mapOf("t" to "bye"), Ctrl.decode(p.read().body))
+        p.assertClosed()
         Thread.sleep(200)
         assertNull(events.poll())
+    }
+
+    @Test
+    fun leaveBeforeWelcomeSendsNoByeAndCloses() {
+        start()
+        assertEquals("status:CONNECTING", next())
+        val p = accept()
+        p.hello()
+        session!!.leave()
+        p.assertClosed()
+        assertNull(events.poll(200, TimeUnit.MILLISECONDS))
+    }
+
+    // T1: 차 인증서 지문이 QR과 다르면 처음 연결부터 붙지 않는다(HELLO·토큰을 보내지 않음)
+    @Test
+    fun carWithAnotherKeyIsUnreachableAndNeverGetsTheToken() {
+        keys.alias = "b"
+        start()
+        assertEquals("status:CONNECTING", next())
+        val s = car.accept() as SSLSocket
+        s.soTimeout = 3_000
+        assertTrue(runCatching { s.startHandshake() }.isFailure)
+        assertEquals("end:UNREACHABLE:null", next())
+    }
+
+    // 재접속도 같은 QR 지문으로 확인한다: 키가 바뀐 차에는 다시 붙지 않고 끝난다
+    @Test
+    fun reconnectToACarWithAnotherKeyIsLost() {
+        val p = connected()
+        keys.alias = "b"
+        val handshakes = handshakeOnlyCar()
+        p.s.close()
+        assertEquals("speaker:false", next())
+        assertEquals("status:RECONNECTING", next())
+        assertEquals("status:RECONNECTING", next())
+        assertEquals("end:LOST:null", next())
+        assertEquals(0, handshakes.get())
+    }
+
+    @Test
+    fun phoneOffersOnlyTls13() {
+        val ctx = SSLContext.getInstance("TLSv1.2").apply { init(arrayOf(keys), null, null) }
+        val old = (ctx.serverSocketFactory.createServerSocket(0) as SSLServerSocket).apply { enabledProtocols = arrayOf("TLSv1.2") }
+        old.use {
+            PhoneSession(JoinUri("127.0.0.1", old.localPort, token, pin), Recorder(), connectTimeoutMs = 1_000, welcomeTimeoutMs = 1_000)
+                .also { session = it; it.start() }
+            assertEquals("status:CONNECTING", next())
+            val s = old.accept() as SSLSocket
+            s.soTimeout = 3_000
+            assertTrue(runCatching { s.startHandshake() }.isFailure)
+            assertEquals("end:UNREACHABLE:null", next())
+        }
     }
 
     @Test
@@ -422,5 +551,30 @@ class PhoneSessionTest {
         assertEquals("speaker:false", next())
         assertEquals("status:RECONNECTING", next())
         assertEquals(mapOf("key" to "N".repeat(22)), accept().hello())
+    }
+
+    private companion object {
+        const val PASS = "changeit"
+
+        /** 시험용 차 키 a·b. 실행 때마다 keytool로 새로 만들고 임시 파일은 바로 지운다. */
+        val store: KeyStore by lazy {
+            val f = File.createTempFile("car", ".p12").apply { delete() }
+            try {
+                for (alias in listOf("a", "b")) {
+                    val p = ProcessBuilder(
+                        File(System.getProperty("java.home"), "bin/keytool").path, "-genkeypair", "-alias", alias, "-keyalg", "EC",
+                        "-groupname", "secp256r1", "-sigalg", "SHA256withECDSA", "-dname", "CN=test", "-validity", "1",
+                        "-storetype", "PKCS12", "-keystore", f.path, "-storepass", PASS, "-keypass", PASS, "-noprompt",
+                    ).redirectErrorStream(true).start()
+                    val out = p.inputStream.readBytes()
+                    check(p.waitFor() == 0) { String(out) }
+                }
+                KeyStore.getInstance("PKCS12").apply { f.inputStream().use { load(it, PASS.toCharArray()) } }
+            } finally {
+                f.delete()
+            }
+        }
+
+        fun pinOf(alias: String): String = Tls.pin(store.getCertificate(alias).publicKey.encoded)
     }
 }

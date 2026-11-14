@@ -126,7 +126,7 @@ class CaptionCheck(
                 val line = captions.snapshot().filterIsInstance<CaptionLog.Entry.Line>().last()
                 out("[first] line=$no phoneMs=$now latencyMs=${line.latencyMs} seq=$lastSeq")
             }
-            out("[cap] phoneMs=$now final=$final text=${text.trim()}")
+            out("[cap] phoneMs=$now final=$final chars=${text.trim().length}")
         }
 
         override fun onEndOfSpeech() {
@@ -193,7 +193,11 @@ class CaptionCheck(
             out("[sum] rx=${rx.get()} gaps=${gaps.get()} pausedRx=$pausedRx speakerRx=$speakerRx")
             out("[latency] total=${captions.totalStats()} recognizer=${captions.recognizerStats()}")
             captions.snapshot().forEach { e ->
-                if (e is CaptionLog.Entry.Line) out("[line] no=${e.no} final=${e.final} latencyMs=${e.latencyMs} text=${e.text}") else out("[entry] $e")
+                when (e) {
+                    is CaptionLog.Entry.Line -> out("[line] no=${e.no} final=${e.final} latencyMs=${e.latencyMs} chars=${e.text.length}")
+                    is CaptionLog.Entry.Shared -> out("[entry] shared no=${e.no} id=${e.id} chars=${e.text.length}")
+                    else -> out("[entry] $e")
+                }
             }
 
             if (endMode == "off") {

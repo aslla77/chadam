@@ -36,10 +36,11 @@ class JoinTargetTest {
     }
 
     @Test
-    fun uriCarriesHostPortToken() {
+    fun uriCarriesHostPortTokenAndPinUnderTheTlsHost() {
+        val pin = "ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
         assertEquals(
-            "cabincaption://join?h=10.2.52.88&p=47100&t=ab-_CD",
-            JoinTarget("10.2.52.88", 47100).uri("ab-_CD"),
+            "cabincaption://join2?h=10.2.52.88&p=47100&t=ab-_CD&f=$pin",
+            JoinTarget("10.2.52.88", 47100).uri("ab-_CD", pin),
         )
     }
 
@@ -74,9 +75,17 @@ class JoinTargetTest {
         assertEquals(JoinTarget("10.0.0.1", 47000), JoinTarget.parse("10.0.0.1", 47000))
     }
 
+    // T7: 폰 JoinUri와 같은 사설 대역만. 공인·통신사 공유(100.64/10)·사설 대역 경계 밖은 거부한다
     @Test
-    fun publicIpIsAcceptedForNow() {
-        assertEquals(JoinTarget("8.8.8.8", 47000), JoinTarget.parse("8.8.8.8", 47000))
+    fun onlyRfc1918RangesAreAccepted() {
+        listOf("10.0.0.1", "10.255.255.254", "172.16.0.1", "172.31.255.254", "192.168.0.1", "192.168.255.254").forEach {
+            assertEquals(it, JoinTarget(it, 47000), JoinTarget.parse(it, 47000))
+        }
+        listOf("8.8.8.8", "100.64.0.1", "100.127.255.254", "172.15.255.254", "172.32.0.1", "192.167.0.1", "192.169.0.1", "11.0.0.1", "1.1.1.1").forEach {
+            assertNull(it, JoinTarget.parse(it, 47000))
+            assertEquals(it, JoinTarget.Input.BadHost, JoinTarget.fromInput(it, "47000"))
+        }
+        assertNull(JoinTarget.choose(null, listOf("100.64.0.5", "203.0.113.7"), 47000))
     }
 
     @Test

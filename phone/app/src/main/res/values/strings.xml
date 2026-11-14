@@ -75,6 +75,8 @@
     <string name="art_mine_line">화장실 들러 줘</string>
     <string name="license_zxing" translatable="false">ZXing core 3.5.4</string>
     <string name="license_zxing_sub">Apache License 2.0 · QR 읽기</string>
+    <string name="license_kotlin" translatable="false">Kotlin stdlib 2.2.10 · JetBrains annotations 13.0</string>
+    <string name="license_kotlin_sub">Apache License 2.0 · 앱 실행</string>
     <string name="license_noto" translatable="false">Noto Sans KR</string>
     <string name="license_noto_sub">SIL Open Font License 1.1 · 앱 아이콘 글자</string>
     <string name="notice_paused">자막 멈춤</string>
@@ -121,6 +123,7 @@
     <string name="unreachable">연결 실패 · Wi-Fi 확인</string>
     <string name="car_off">차 꺼짐</string>
     <string name="lost">연결 끊김</string>
+    <string name="kicked">내보내짐</string>
     <string name="theme_button">테마</string>
     <string name="theme_selected">%1$s, 선택됨</string>
     <string name="theme_system">기기 설정</string>

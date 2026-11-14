@@ -35,4 +35,21 @@
     <string name="settings_cancel">취소</string>
     <string name="settings_bad_host">주소 오류</string>
     <string name="settings_bad_port">포트 오류</string>
+    <string name="kick">내보내기</string>
+    <string name="kick_description">%1$s 내보내기</string>
+    <string name="phone_unnamed">이름 없음</string>
+    <string name="licenses">오픈소스 라이선스</string>
+    <string name="licenses_close">닫기</string>
+    <string name="license_apache" translatable="false">Apache License 2.0</string>
+    <string name="license_zxing" translatable="false">ZXing core 3.5.4</string>
+    <string name="license_androidx" translatable="false">AndroidX core·core-ktx·activity·fragment·lifecycle·savedstate·annotation·arch.core·collection·concurrent-futures·customview·loader·viewpager·tracing·versionedparcelable</string>
+    <string name="license_dagger" translatable="false">Dagger · Hilt 2.51.1</string>
+    <string name="license_gson" translatable="false">Gson 2.10.1</string>
+    <string name="license_kotlin" translatable="false">Kotlin stdlib 2.2.10 · kotlin-reflect 1.9.25</string>
+    <string name="license_coroutines" translatable="false">kotlinx-coroutines 1.6.3</string>
+    <string name="license_misc" translatable="false">JSR 305 3.0.2 · javax.inject 1 · Guava listenablefuture 1.0 · JetBrains annotations 13.0</string>
+    <string name="license_noto" translatable="false">Noto Sans KR</string>
+    <string name="license_noto_sub">SIL Open Font License 1.1 · 앱 아이콘 글자</string>
+    <string name="license_pleos" translatable="false">Pleos Vehicle SDK 2.3.2</string>
+    <string name="license_pleos_sub">Pleos Playground 제공</string>
 </resources>
