@@ -53,6 +53,26 @@
     <string name="privacy_name_sub">대화명은 같은 차 동승자에게 보임</string>
     <string name="privacy_accuracy">자막은 틀릴 수 있음</string>
     <string name="privacy_accuracy_sub">긴급 안내용 아님</string>
+    <string name="tutorial">사용설명서</string>
+    <string name="skip">건너뛰기</string>
+    <string name="next">다음</string>
+    <string name="start_app">시작하기</string>
+    <string name="tut_about">차 안 대화를 자막으로</string>
+    <string name="tut_about_detail">차 마이크가 들은 말을 내 폰에 자막으로 띄워요. 내가 쓴 글은 차 스피커가 읽어 줘요.</string>
+    <string name="tut_join">QR 찍고 연결</string>
+    <string name="tut_join_detail">차에서 차담을 열면 QR이 떠요. 폰으로 찍고 대화명을 정하면 들어가요.</string>
+    <string name="tut_caption">말은 자막으로</string>
+    <string name="tut_caption_detail">차 안에서 한 말이 \"차\" 말풍선으로 떠요. 다른 동승자가 쓴 글은 대화명과 함께 보여요.</string>
+    <string name="tut_speak">글은 차 스피커로</string>
+    <string name="tut_speak_detail">아래 칸에 쓰고 보내면 차 스피커가 읽어 줘요. 위쪽 스피커를 끄면 다른 폰에만 보내요.</string>
+    <string name="tut_safe">저장하지 않아요</string>
+    <string name="tut_safe_detail">폰 마이크는 켜지 않고, 인식은 이 폰 안에서 해요. 나가면 자막과 글이 지워져요.</string>
+    <string name="art_session">세션 연결중</string>
+    <string name="art_name">엄마</string>
+    <string name="art_car_line">30분쯤 뒤면 도착해요</string>
+    <string name="art_shared_name">지안</string>
+    <string name="art_shared_line">휴게소 들를까?</string>
+    <string name="art_mine_line">화장실 들러 줘</string>
     <string name="license_zxing" translatable="false">ZXing core 3.5.4</string>
     <string name="license_zxing_sub">Apache License 2.0 · QR 읽기</string>
     <string name="license_noto" translatable="false">Noto Sans KR</string>

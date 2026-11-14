@@ -20,7 +20,9 @@ import android.text.InputFilter
 import android.text.TextWatcher
 import android.util.Log
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -58,7 +60,7 @@ import kotlin.concurrent.thread
  */
 class MainActivity : Activity() {
 
-    private enum class Screen { START, SCAN, CONSENT, CONNECTING, TALK, THEME, SETTINGS, PRIVACY, LICENSES, NAME }
+    private enum class Screen { START, SCAN, CONSENT, CONNECTING, TALK, THEME, SETTINGS, PRIVACY, LICENSES, NAME, TUTORIAL }
 
     private var screen = Screen.START
     private var openingVisible = true
@@ -69,6 +71,7 @@ class MainActivity : Activity() {
     private var pendingJoin: JoinUri? = null
     private var askName = false
     private var nameBack = Screen.START
+    private var tutorialIndex = 0
     private var session: PhoneSession? = null
     @Volatile
     private var generation = 0
@@ -112,6 +115,14 @@ class MainActivity : Activity() {
     private lateinit var nameEdit: EditText
     private lateinit var nameSave: Button
     private lateinit var agreeButton: Button
+    private lateinit var contentView: View
+    private lateinit var tutorialPanel: View
+    private lateinit var tutorialArt: FrameLayout
+    private lateinit var tutorialTitle: TextView
+    private lateinit var tutorialDetail: TextView
+    private lateinit var tutorialCount: TextView
+    private lateinit var tutorialDots: LinearLayout
+    private lateinit var tutorialNext: Button
     private lateinit var startPanel: View
     private lateinit var qrIcon: View
     private lateinit var themePanel: View
@@ -151,6 +162,8 @@ class MainActivity : Activity() {
         pal = Themes.palette(themeId)
         setUi()
         onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { onBack() }
+        // 처음 설치해 열면 사용설명서부터. QR 링크로 들어왔으면 링크가 이긴다
+        if (savedInstanceState == null && !getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_TUTORIAL_SEEN, false)) screen = Screen.TUTORIAL
         handleLink(intent)
         handlePreview(intent)
         render()
@@ -207,6 +220,7 @@ class MainActivity : Activity() {
             Screen.SCAN, Screen.CONSENT, Screen.SETTINGS -> show(Screen.START)
             Screen.THEME, Screen.PRIVACY, Screen.LICENSES -> show(Screen.SETTINGS)
             Screen.NAME -> show(nameBack)
+            Screen.TUTORIAL -> finishTutorial()
             Screen.TALK, Screen.CONNECTING -> moveTaskToBack(true)
             Screen.START -> finish()
         }
@@ -352,6 +366,21 @@ class MainActivity : Activity() {
     // SpeechRecognizer는 RECORD_AUDIO가 있어야 한다(ADR-0002 RT-07). 폰 마이크는 열지 않고 차 소리만 넣는다
     private fun savedName(): String? =
         getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_NAME, null)?.takeIf(Wire::validName)
+
+    private fun openTutorial() {
+        tutorialIndex = 0
+        show(Screen.TUTORIAL)
+    }
+
+    private fun finishTutorial() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_TUTORIAL_SEEN, true).apply()
+        show(Screen.START)
+    }
+
+    private fun goTutorial(index: Int) {
+        tutorialIndex = index
+        render()
+    }
 
     private fun saveName(name: String) {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_NAME, name).apply()
@@ -669,6 +698,10 @@ class MainActivity : Activity() {
         namePanel.visibility = vis(screen == Screen.NAME)
         talkPanel.visibility = vis(screen == Screen.TALK)
         plainScroll.visibility = vis(screen != Screen.TALK)
+        tutorialPanel.visibility = vis(screen == Screen.TUTORIAL)
+        contentView.importantForAccessibility =
+            if (screen == Screen.TUTORIAL) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        if (screen == Screen.TUTORIAL) renderTutorial()
         renderHeader()
         plain.setPadding(px(20), px(if (screen == Screen.CONSENT) 40 else 12), px(20), px(32))
         val name = savedName()
@@ -1040,7 +1073,233 @@ class MainActivity : Activity() {
             addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(nameRow, gap(16))
             addView(View(this@MainActivity), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(button(getString(R.string.tutorial), filled = false, heightDp = 48) { openTutorial() }, gap(16))
         }
+    }
+
+    /** 누구지 튜토리얼 구성: 위 제목·건너뛰기, 가운데 그림 카드, 점, 아래 떠 있는 설명 상자. */
+    private fun buildTutorialPanel(): View {
+        tutorialTitle = text(26f).apply { typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) }
+        tutorialArt = FrameLayout(this)
+        tutorialDetail = text(16f, pal.sub).apply { setPadding(0, px(4), 0, 0); setLineSpacing(0f, 1.15f) }
+        tutorialCount = text(13f, pal.sub).apply { typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) }
+        tutorialDots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        tutorialNext = Button(this).apply {
+            isAllCaps = false
+            stateListAnimator = null
+            minHeight = px(52)
+            minimumHeight = px(52)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(pal.onAccent)
+            background = buttonBackground(filled = true, radiusDp = 14)
+            setOnClickListener { if (TutorialPage.isLast(tutorialIndex)) finishTutorial() else goTutorial(TutorialPage.next(tutorialIndex)) }
+        }
+        val swipe = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+                override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                    val dx = e2.x - (e1?.x ?: e2.x)
+                    if (kotlin.math.abs(dx) < px(48) || kotlin.math.abs(vx) < kotlin.math.abs(vy)) return false
+                    goTutorial(if (dx < 0) TutorialPage.next(tutorialIndex) else TutorialPage.previous(tutorialIndex))
+                    return true
+                }
+            },
+        )
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(pal.surface, 24, pal.surfaceBorder, Themes.SURFACE_BORDER_DP)
+            setPadding(px(22), px(24), px(22), px(22))
+            addView(tutorialTitle)
+            addView(tutorialArt, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = px(16) })
+            setOnTouchListener { _, e -> swipe.onTouchEvent(e) }
+        }
+        val popup = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(pal.bg, 18, pal.surfaceBorder ?: pal.line, 1f)
+            elevation = pxf(14f)
+            setPadding(px(18), px(16), px(18), px(18))
+            addView(
+                LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(tutorialDetail, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(tutorialCount, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = px(12); gravity = Gravity.TOP })
+                },
+            )
+            addView(tutorialNext, gap(14))
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = px(56)
+            addView(text(28f).apply { setText(R.string.tutorial); typeface = Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 0) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(
+                text(15f).apply {
+                    setText(R.string.skip)
+                    typeface = Typeface.DEFAULT_BOLD
+                    gravity = Gravity.CENTER
+                    minHeight = px(48)
+                    setPadding(px(12), 0, px(4), 0)
+                    background = RippleDrawable(ColorStateList.valueOf(ripple(pal.text)), null, shape(Color.BLACK, 24))
+                    isClickable = true
+                    setOnClickListener { finishTutorial() }
+                },
+            )
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(pal.bg)
+            isClickable = true
+            setPadding(px(20), px(12), px(20), px(28))
+            addView(top)
+            addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = px(12) })
+            addView(tutorialDots, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px(32)).apply { topMargin = px(8) })
+            addView(popup, gap(8))
+        }
+    }
+
+    private fun renderTutorial() {
+        val page = TutorialPage.at(tutorialIndex)
+        tutorialTitle.setText(page.title)
+        tutorialDetail.setText(page.detail)
+        val total = TutorialPage.entries.size
+        tutorialCount.text = getString(R.string.counter, tutorialIndex + 1, total)
+        tutorialNext.setText(if (TutorialPage.isLast(tutorialIndex)) R.string.start_app else R.string.next)
+        tutorialDots.removeAllViews()
+        for (i in 0 until total) {
+            tutorialDots.addView(
+                View(this).apply { background = shape(if (i == tutorialIndex) pal.text else pal.line, 4) },
+                LinearLayout.LayoutParams(px(8), px(8)).apply { marginStart = px(4); marginEnd = px(4) },
+            )
+        }
+        tutorialArt.removeAllViews()
+        tutorialArt.addView(tutorialArt(page), FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        tutorialArt.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    }
+
+    /** 장마다 실제 화면을 줄여 그린 그림. 글자는 그림의 일부라 dp로 고정한다. */
+    private fun tutorialArt(page: TutorialPage): View = when (page) {
+        TutorialPage.ABOUT -> artRow(
+            miniCar(),
+            artArrow(),
+            miniPhone(miniBubble(getString(R.string.label_car), getString(R.string.art_car_line), Look.CAR), miniBubble(getString(R.string.label_me), getString(R.string.art_mine_line), Look.MINE)),
+        )
+        TutorialPage.JOIN -> artRow(
+            miniCar(),
+            artArrow(),
+            miniPhone(
+                FrameLayout(this).apply {
+                    background = shape(0xFF1A1A1A.toInt(), 8)
+                    addView(iconView(IconDrawable.Kind.CORNERS, Color.WHITE), FrameLayout.LayoutParams(px(56), px(56), Gravity.CENTER))
+                }.also { it.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px(96)) },
+                artText(getString(R.string.art_name), 12f, pal.text, bold = true).apply {
+                    background = shape(pal.field, 14, pal.border, 1f)
+                    setPadding(px(10), px(6), px(10), px(6))
+                },
+            ),
+        )
+        TutorialPage.CAPTION -> miniPhone(
+            miniBubble(getString(R.string.label_car), getString(R.string.art_car_line), Look.CAR),
+            miniBubble(getString(R.string.art_shared_name), getString(R.string.art_shared_line), Look.SHARED),
+            wide = true,
+        )
+        TutorialPage.SPEAK -> artRow(
+            miniPhone(
+                miniBubble(getString(R.string.label_me), getString(R.string.art_mine_line), Look.MINE),
+                artText(getString(R.string.step_playing), 10f, pal.sub).apply { gravity = Gravity.END },
+            ),
+            artArrow(),
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(
+                    FrameLayout(this@MainActivity).apply {
+                        background = shape(pal.accent, 36)
+                        addView(iconView(IconDrawable.Kind.SPEAKER, pal.onAccent), FrameLayout.LayoutParams(px(36), px(36), Gravity.CENTER))
+                    },
+                    LinearLayout.LayoutParams(px(72), px(72)),
+                )
+                addView(artText(getString(R.string.car_speaker_description), 12f, pal.text, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = px(8) })
+            },
+        )
+        TutorialPage.SAFE -> LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            listOf(
+                IconDrawable.Kind.MIC_OFF to R.string.privacy_mic,
+                IconDrawable.Kind.PHONE to R.string.privacy_device,
+                IconDrawable.Kind.TRASH to R.string.privacy_store,
+            ).forEachIndexed { i, (kind, label) ->
+                addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(iconView(kind, pal.text), LinearLayout.LayoutParams(px(32), px(32)))
+                        addView(artText(getString(label), 17f, pal.text, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = px(14) })
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { if (i > 0) topMargin = px(22) },
+                )
+            }
+        }
+    }
+
+    // 그림 속 글자는 dp로 고정한다. 시스템 글자 크기를 따르면 그림 틀 밖으로 넘친다
+    private fun artText(s: String, sizeDp: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+        text = s
+        setTextColor(color)
+        setTextSize(TypedValue.COMPLEX_UNIT_DIP, sizeDp)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun artRow(vararg views: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        views.forEach { addView(it) }
+    }
+
+    private fun artArrow() = iconView(IconDrawable.Kind.CHEVRON, pal.sub).apply {
+        layoutParams = LinearLayout.LayoutParams(px(26), px(26)).apply { marginStart = px(6); marginEnd = px(6) }
+    }
+
+    /** 차 화면은 실제처럼 늘 어둡다. */
+    private fun miniCar() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        background = shape(0xFF111111.toInt(), 10, 0xFF3A3A3A.toInt(), 1f)
+        layoutParams = LinearLayout.LayoutParams(px(118), px(96))
+        addView(iconView(IconDrawable.Kind.QR, Color.WHITE), LinearLayout.LayoutParams(px(44), px(44)))
+        addView(artText(getString(R.string.art_session), 10f, Color.WHITE, bold = true), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = px(6) })
+    }
+
+    private fun miniPhone(vararg views: View, wide: Boolean = false) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(pal.bg, 18, pal.border, 2f)
+        setPadding(px(10), px(14), px(10), px(14))
+        layoutParams = LinearLayout.LayoutParams(px(if (wide) 220 else 132), px(if (wide) 250 else 210))
+        views.forEach { v -> addView(v, (v.layoutParams as? LinearLayout.LayoutParams) ?: LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = px(8) }) }
+    }
+
+    private fun miniBubble(label: String, line: String, look: Look) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        val right = look == Look.MINE
+        gravity = if (right) Gravity.END else Gravity.START
+        addView(artText(label, 9f, pal.sub, bold = true))
+        addView(
+            artText(line, 11f, if (right) pal.onAccent else pal.text).apply {
+                background = when (look) {
+                    Look.MINE -> shape(pal.accent, 10)
+                    Look.SHARED -> shape(pal.bg, 10, pal.shared, 1.5f)
+                    else -> shape(pal.surface, 10, pal.surfaceBorder, 1f)
+                }
+                setPadding(px(8), px(5), px(8), px(5))
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = px(2) },
+        )
     }
 
     private fun nameField() = EditText(this).apply {
@@ -1379,6 +1638,7 @@ class MainActivity : Activity() {
         licensesPanel = buildLicensesPanel()
         namePanel = buildNamePanel()
         talkPanel = buildTalkPanel()
+        tutorialPanel = buildTutorialPanel()
         val full = ViewGroup.LayoutParams.MATCH_PARENT
         val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
         plain = LinearLayout(this).apply {
@@ -1399,7 +1659,7 @@ class MainActivity : Activity() {
             isFillViewport = true
             addView(plain)
         }
-        val content = LinearLayout(this).apply {
+        contentView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.bg)
             addView(plainScroll, LinearLayout.LayoutParams(full, 0, 1f))
@@ -1407,7 +1667,8 @@ class MainActivity : Activity() {
         }
         openingView = buildOpening().apply { visibility = vis(openingVisible) }
         return FrameLayout(this).apply {
-            addView(content, FrameLayout.LayoutParams(full, full))
+            addView(contentView, FrameLayout.LayoutParams(full, full))
+            addView(tutorialPanel, FrameLayout.LayoutParams(full, full))
             addView(openingView, FrameLayout.LayoutParams(full, full))
         }
     }
@@ -1425,6 +1686,7 @@ class MainActivity : Activity() {
         const val PREFS = "settings"
         const val PREF_NAME = "name"
         const val PREF_THEME = "theme"
+        const val PREF_TUTORIAL_SEEN = "tutorial_seen"
         const val EXTRA_PREVIEW = "preview"
         const val EXTRA_THEME = "theme"
         val MEDIUM: Typeface = Typeface.create(Typeface.DEFAULT, 500, false)
